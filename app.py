@@ -4,7 +4,7 @@ import argparse
 import openai
 
 # Set your OpenAI API key
-openai.api_key = os.environ.get('YOUR_OPENAI_API_KEY')
+openai.api_key = os.environ.get('OPENAI_API_KEY')
 
 
 def print_step(step):
