@@ -1,0 +1,15 @@
+[tool.poetry]
+name = "autoporter"
+version = "0.1.0"
+description = "Convert dotnet to python projects"
+authors = ["Jack Danger <git@jackdanger.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+openai = "^1.51.0"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
