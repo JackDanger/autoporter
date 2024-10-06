@@ -1,10 +1,11 @@
 import os
 import sys
 import argparse
-import openai
+from openai import OpenAI
+
+client = OpenAI(api_key=os.environ.get('OPENAI_API_KEY'))
 
 # Set your OpenAI API key
-openai.api_key = os.environ.get('OPENAI_API_KEY')
 
 
 def print_step(step):
@@ -51,15 +52,13 @@ def strategy_reimplement_from_design(dotnet_files, output_dir):
 
 def translate_code(code):
     print_step("Using LLM to translate code.")
-    response = openai.ChatCompletion.create(
-        model="gpt-4",
-        messages=[
-            {"role": "system", "content": "You are an expert in converting .NET code to Python code, ensuring functionality is preserved and unnecessary complexity is simplified."},
-            {"role": "user", "content": f"Convert the following .NET code to Python, simplifying unnecessary complexity and including necessary comments:\n\n{code}"}
-        ],
-        temperature=0
-    )
-    translated_code = response['choices'][0]['message']['content']
+    response = client.chat.completions.create(model="gpt-4",
+    messages=[
+        {"role": "system", "content": "You are an expert in converting .NET code to Python code, ensuring functionality is preserved and unnecessary complexity is simplified."},
+        {"role": "user", "content": f"Convert the following .NET code to Python, simplifying unnecessary complexity and including necessary comments:\n\n{code}"}
+    ],
+    temperature=0)
+    translated_code = response.choices[0].message.content
     return translated_code
 
 
@@ -71,41 +70,35 @@ def extract_project_description(dotnet_files):
             code = f.read()
         code_snippets.append(code)
     combined_code = "\n".join(code_snippets)
-    response = openai.ChatCompletion.create(
-        model="gpt-4",
-        messages=[
-            {"role": "system", "content": "You are an expert software analyst."},
-            {"role": "user", "content": f"Provide a high-level description of the project's functionality based on the following code:\n\n{combined_code}"}
-        ],
-        temperature=0
-    )
-    project_description = response['choices'][0]['message']['content']
+    response = client.chat.completions.create(model="gpt-4",
+    messages=[
+        {"role": "system", "content": "You are an expert software analyst."},
+        {"role": "user", "content": f"Provide a high-level description of the project's functionality based on the following code:\n\n{combined_code}"}
+    ],
+    temperature=0)
+    project_description = response.choices[0].message.content
     return project_description
 
 
 def generate_high_level_design(project_description):
-    response = openai.ChatCompletion.create(
-        model="gpt-4",
-        messages=[
-            {"role": "system", "content": "You are an expert software architect."},
-            {"role": "user", "content": f"Based on the following project description, create a high-level design for a Python implementation, focusing on simplicity and efficiency:\n\n{project_description}"}
-        ],
-        temperature=0
-    )
-    design = response['choices'][0]['message']['content']
+    response = client.chat.completions.create(model="gpt-4",
+    messages=[
+        {"role": "system", "content": "You are an expert software architect."},
+        {"role": "user", "content": f"Based on the following project description, create a high-level design for a Python implementation, focusing on simplicity and efficiency:\n\n{project_description}"}
+    ],
+    temperature=0)
+    design = response.choices[0].message.content
     return design
 
 
 def implement_python_project(design, output_dir):
-    response = openai.ChatCompletion.create(
-        model="gpt-4",
-        messages=[
-            {"role": "system", "content": "You are an expert Python developer."},
-            {"role": "user", "content": f"Implement the Python project based on the following design, include code files and necessary comments:\n\n{design}"}
-        ],
-        temperature=0
-    )
-    code_files = parse_code_files_from_response(response['choices'][0]['message']['content'])
+    response = client.chat.completions.create(model="gpt-4",
+    messages=[
+        {"role": "system", "content": "You are an expert Python developer."},
+        {"role": "user", "content": f"Implement the Python project based on the following design, include code files and necessary comments:\n\n{design}"}
+    ],
+    temperature=0)
+    code_files = parse_code_files_from_response(response.choices[0].message.content)
     for file_name, code in code_files.items():
         output_path = os.path.join(output_dir, file_name)
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -140,15 +133,13 @@ def generate_unit_tests(output_dir):
 
 
 def generate_unit_test(code, file_path):
-    response = openai.ChatCompletion.create(
-        model="gpt-4",
-        messages=[
-            {"role": "system", "content": "You are an expert in writing Python unit tests using unittest or pytest framework."},
-            {"role": "user", "content": f"Write unit tests for the following Python code:\n\n{code}"}
-        ],
-        temperature=0
-    )
-    unit_test_code = response['choices'][0]['message']['content']
+    response = client.chat.completions.create(model="gpt-4",
+    messages=[
+        {"role": "system", "content": "You are an expert in writing Python unit tests using unittest or pytest framework."},
+        {"role": "user", "content": f"Write unit tests for the following Python code:\n\n{code}"}
+    ],
+    temperature=0)
+    unit_test_code = response.choices[0].message.content
     return unit_test_code
 
 
