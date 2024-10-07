@@ -1,7 +1,12 @@
 import os
+import time
 import argparse
-import requests
-import json
+from openai import OpenAI
+from openai import RateLimitError, APIError
+
+client = OpenAI(api_key=os.environ.get('OPENAI_API_KEY'))
+
+# Set your OpenAI API key
 
 
 def print_step(step):
@@ -28,6 +33,7 @@ def strategy_file_by_file_translation(dotnet_files, project_path, output_dir):
         print_step(f"Translating {file_path}.")
         translated_code = translate_code(code)
         relative_path = os.path.relpath(file_path, project_path)
+        relative_path = os.path.normpath(relative_path)
         output_path = os.path.join(output_dir, relative_path)
         output_path = os.path.splitext(output_path)[0] + '.py'
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -37,7 +43,7 @@ def strategy_file_by_file_translation(dotnet_files, project_path, output_dir):
 
 
 def strategy_simplify_python_app(strategy1_output_dir, output_dir):
-    print_step("Starting Strategy 1.1: Simplifying the Python app.")
+    print_step("Starting Strategy 1.1: Simplifying the Python application.")
     python_files = []
     for root, _, files in os.walk(strategy1_output_dir):
         for file in files:
@@ -69,25 +75,26 @@ def strategy_reimplement_from_design(dotnet_files, output_dir):
 
 def translate_code(code):
     print_step("Using LLM to translate code.")
-    prompt = f"""You are an expert in converting .NET code to Python code, ensuring functionality is preserved and unnecessary complexity is simplified.
-
-Convert the following .NET code to Python, simplifying unnecessary complexity and including necessary comments:
-
-{code}
-"""
-    response = query_ollama(prompt)
+    prompt = (
+        "You are an expert software engineer proficient in both C# and Python. "
+        "Convert the following C# code to Python, ensuring that functionality is preserved. "
+        "Simplify any unnecessary complexity and follow Python best practices and conventions. "
+        "Provide well-formatted, lint-compliant Python code.\n\n"
+        f"C# Code:\n{code}\n\nPython Code:"
+    )
+    response = call_openai_api(prompt)
     return response
 
 
 def simplify_python_code(code):
     print_step("Using LLM to simplify Python code.")
-    prompt = f"""You are an expert Python developer. Refactor the following Python code to simplify unnecessary complexity. Introduce SQLAlchemy for all database connections, FastAPI for all HTTP endpoints, and pytest for all tests.
-
-Ensure that the functionality is preserved, and provide necessary comments:
-
-{code}
-"""
-    simplified_code = query_ollama_iterative(prompt)
+    prompt = (
+        "You are an experienced Python developer. Refactor the following Python code to enhance simplicity and efficiency. "
+        "Introduce SQLAlchemy for database interactions, FastAPI for HTTP endpoints, and pytest for unit testing where appropriate. "
+        "Ensure the refactored code preserves the original functionality, follows Python best practices, and is lint-compliant.\n\n"
+        f"Original Python Code:\n{code}\n\nRefactored Python Code:"
+    )
+    simplified_code = call_openai_api(prompt)
     return simplified_code
 
 
@@ -99,40 +106,37 @@ def extract_project_description(dotnet_files):
             code = f.read()
         code_snippets.append(code)
     combined_code = "\n".join(code_snippets)
-    prompt = f"""You are an expert software analyst.
-
-Provide a high-level description of the project's functionality based on the following code:
-
-{combined_code}
-"""
-    project_description = query_ollama(prompt)
+    prompt = (
+        "You are a senior software analyst. Based on the following C# codebase, provide a detailed, high-level description "
+        "of the project's functionality, including key components and their interactions.\n\n"
+        f"C# Codebase:\n{combined_code}\n\nProject Description:"
+    )
+    project_description = call_openai_api(prompt)
     return project_description
 
 
 def generate_high_level_design(project_description):
     print_step("Generating high-level design.")
-    prompt = f"""You are an expert software architect.
-
-Based on the following project description, create a high-level design for a Python implementation, focusing on simplicity and efficiency:
-
-{project_description}
-"""
-    design = query_ollama(prompt)
+    prompt = (
+        "You are a software architect. Using the following project description, create a detailed high-level design for a Python "
+        "implementation of the project. The design should focus on simplicity, efficiency, and adherence to Python best practices. "
+        "Include suggestions for using SQLAlchemy for database interactions, FastAPI for HTTP endpoints, and pytest for testing.\n\n"
+        f"Project Description:\n{project_description}\n\nHigh-Level Design:"
+    )
+    design = call_openai_api(prompt)
     return design
 
 
 def implement_python_project(design, output_dir):
     print_step("Implementing Python project based on the design.")
-    prompt = f"""You are an expert Python developer.
-
-Implement the Python project based on the following design, include code files and necessary comments. Use SQLAlchemy for database connections, FastAPI for HTTP endpoints, and pytest for tests. Provide the code files in the format:
-
-[filename.py]
-<code>
-
-{design}
-"""
-    response_content = query_ollama_iterative(prompt)
+    prompt = (
+        "You are an expert Python developer. Implement the Python project based on the following high-level design. "
+        "Use SQLAlchemy for database interactions, FastAPI for HTTP endpoints, and pytest for tests. "
+        "Ensure the code follows Python conventions, is well-documented, and passes linting. "
+        "Provide the code files in the format:\n\n[filename.py]\n<code>\n\n"
+        f"High-Level Design:\n{design}\n\nPython Code:"
+    )
+    response_content = call_openai_api(prompt)
     code_files = parse_code_files_from_response(response_content)
     for file_name, code in code_files.items():
         sanitized_file_name = sanitize_filename(file_name)
@@ -182,7 +186,7 @@ def generate_unit_tests(output_dir):
         with open(file_path, 'r', encoding='utf-8') as f:
             code = f.read()
         print_step(f"Generating unit test for {file_path}.")
-        unit_test_code = generate_unit_test(code, file_path)
+        unit_test_code = generate_unit_test(code)
         test_file_name = f'test_{os.path.basename(file_path)}'
         test_file_path = os.path.join(os.path.dirname(file_path), test_file_name)
         os.makedirs(os.path.dirname(test_file_path), exist_ok=True)
@@ -190,14 +194,14 @@ def generate_unit_tests(output_dir):
             f.write(unit_test_code)
 
 
-def generate_unit_test(code, file_path):
-    prompt = f"""You are an expert in writing Python unit tests using pytest framework.
-
-Write unit tests for the following Python code:
-
-{code}
-"""
-    unit_test_code = query_ollama_iterative(prompt)
+def generate_unit_test(code):
+    prompt = (
+        "You are an expert Python developer specializing in writing unit tests using pytest. "
+        "Write comprehensive unit tests for the following Python code. Ensure the tests cover all significant functionality and edge cases. "
+        "Provide the test code in a lint-compliant format.\n\n"
+        f"Python Code:\n{code}\n\nPytest Unit Tests:"
+    )
+    unit_test_code = call_openai_api(prompt)
     return unit_test_code
 
 
@@ -212,45 +216,23 @@ def evaluate_project(project_dir):
     return num_files
 
 
-def query_ollama(prompt, model='llama2'):
-    url = 'http://localhost:11434/api/generate'
-    headers = {'Content-Type': 'application/json'}
-    payload = {
-        'model': model,
-        'prompt': prompt
-    }
-    response = requests.post(url, headers=headers, data=json.dumps(payload), stream=True)
-    if response.status_code == 200:
-        generated_text = ''
-        for line in response.iter_lines():
-            if line:
-                try:
-                    json_data = json.loads(line.decode('utf-8'))
-                    generated_text += json_data.get('response', '')
-                except json.JSONDecodeError:
-                    continue
-        return generated_text.strip()
-    else:
-        print_step(f"Error querying Ollama API: {response.status_code} {response.text}")
-        return ''
-
-
-def query_ollama_iterative(prompt, model='llama2'):
-    response = ''
-    max_iterations = 5
-    for i in range(max_iterations):
-        print_step(f"Iteration {i + 1} for prompt.")
-        partial_response = query_ollama(prompt, model=model)
-        if validate_response(partial_response):
-            response = partial_response
-            break
-        else:
-            prompt += "\n\nPlease ensure the response is correctly formatted and complete."
-    return response.strip()
-
-
-def validate_response(response):
-    return bool(response.strip())
+def call_openai_api(prompt, model='gpt-4'):
+    max_retries = 5
+    retry_delay = 1  # Start with 1 second delay
+    for attempt in range(max_retries):
+        try:
+            response = client.chat.completions.create(model=model,
+            messages=[
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0)
+            return response.choices[0].message.content.strip()
+        except (RateLimitError, APIError) as e:
+            print_step(f"API error: {e}. Retrying in {retry_delay} seconds...")
+            time.sleep(retry_delay)
+            retry_delay *= 2  # Exponential backoff
+    print_step("Failed to get a valid response from OpenAI API.")
+    return ''
 
 
 def main():
