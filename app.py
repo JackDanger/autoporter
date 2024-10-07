@@ -52,7 +52,7 @@ def strategy_reimplement_from_design(dotnet_files, output_dir):
 
 def translate_code(code):
     print_step("Using LLM to translate code.")
-    response = client.chat.completions.create(model="gpt-4",
+    response = client.chat.completions.create(model="gpt-4o-mini",
     messages=[
         {"role": "system", "content": "You are an expert in converting .NET code to Python code, ensuring functionality is preserved and unnecessary complexity is simplified."},
         {"role": "user", "content": f"Convert the following .NET code to Python, simplifying unnecessary complexity and including necessary comments:\n\n{code}"}
@@ -70,7 +70,7 @@ def extract_project_description(dotnet_files):
             code = f.read()
         code_snippets.append(code)
     combined_code = "\n".join(code_snippets)
-    response = client.chat.completions.create(model="gpt-4",
+    response = client.chat.completions.create(model="gpt-4o-mini",
     messages=[
         {"role": "system", "content": "You are an expert software analyst."},
         {"role": "user", "content": f"Provide a high-level description of the project's functionality based on the following code:\n\n{combined_code}"}
@@ -81,7 +81,7 @@ def extract_project_description(dotnet_files):
 
 
 def generate_high_level_design(project_description):
-    response = client.chat.completions.create(model="gpt-4",
+    response = client.chat.completions.create(model="gpt-4o-mini",
     messages=[
         {"role": "system", "content": "You are an expert software architect."},
         {"role": "user", "content": f"Based on the following project description, create a high-level design for a Python implementation, focusing on simplicity and efficiency:\n\n{project_description}"}
@@ -92,7 +92,7 @@ def generate_high_level_design(project_description):
 
 
 def implement_python_project(design, output_dir):
-    response = client.chat.completions.create(model="gpt-4",
+    response = client.chat.completions.create(model="gpt-4o-mini",
     messages=[
         {"role": "system", "content": "You are an expert Python developer."},
         {"role": "user", "content": f"Implement the Python project based on the following design, include code files and necessary comments:\n\n{design}"}
@@ -133,7 +133,7 @@ def generate_unit_tests(output_dir):
 
 
 def generate_unit_test(code, file_path):
-    response = client.chat.completions.create(model="gpt-4",
+    response = client.chat.completions.create(model="gpt-4o-mini",
     messages=[
         {"role": "system", "content": "You are an expert in writing Python unit tests using unittest or pytest framework."},
         {"role": "user", "content": f"Write unit tests for the following Python code:\n\n{code}"}
