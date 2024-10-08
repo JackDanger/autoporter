@@ -1,12 +1,9 @@
+import argparse
+import boto3
+import json
 import os
 import time
-import argparse
-from openai import OpenAI
-from openai import RateLimitError, APIError
-
-client = OpenAI(api_key=os.environ.get('OPENAI_API_KEY'))
-
-# Set your OpenAI API key
+from botocore.exceptions import ClientError
 
 
 def print_step(step):
@@ -76,25 +73,29 @@ def strategy_reimplement_from_design(dotnet_files, output_dir):
 def translate_code(code):
     print_step("Using LLM to translate code.")
     prompt = (
-        "You are an expert software engineer proficient in both C# and Python. "
-        "Convert the following C# code to Python, ensuring that functionality is preserved. "
-        "Simplify any unnecessary complexity and follow Python best practices and conventions. "
-        "Provide well-formatted, lint-compliant Python code.\n\n"
+        "As an expert software engineer proficient in both C# and Python, "
+        "your task is to convert the following C# code to Python. "
+        "Ensure that functionality is preserved, unnecessary complexity is simplified, "
+        "and the code follows Python best practices and conventions. "
+        "Include any explanatory comments as Python code comments. "
+        "Provide only the Python code without additional explanations.\n\n"
         f"C# Code:\n{code}\n\nPython Code:"
     )
-    response = call_openai_api(prompt)
+    response = call_bedrock_api(prompt)
     return response
 
 
 def simplify_python_code(code):
     print_step("Using LLM to simplify Python code.")
     prompt = (
-        "You are an experienced Python developer. Refactor the following Python code to enhance simplicity and efficiency. "
+        "As an experienced Python developer, refactor the following Python code to enhance simplicity and efficiency. "
         "Introduce SQLAlchemy for database interactions, FastAPI for HTTP endpoints, and pytest for unit testing where appropriate. "
-        "Ensure the refactored code preserves the original functionality, follows Python best practices, and is lint-compliant.\n\n"
+        "Ensure the refactored code preserves the original functionality, follows Python best practices, and is lint-compliant. "
+        "Include any explanations or notes as Python code comments. "
+        "Provide only the refactored Python code without additional explanations.\n\n"
         f"Original Python Code:\n{code}\n\nRefactored Python Code:"
     )
-    simplified_code = call_openai_api(prompt)
+    simplified_code = call_bedrock_api(prompt)
     return simplified_code
 
 
@@ -107,36 +108,38 @@ def extract_project_description(dotnet_files):
         code_snippets.append(code)
     combined_code = "\n".join(code_snippets)
     prompt = (
-        "You are a senior software analyst. Based on the following C# codebase, provide a detailed, high-level description "
-        "of the project's functionality, including key components and their interactions.\n\n"
+        "As a senior software analyst, provide a detailed, high-level description of the project's functionality based on the following C# codebase. "
+        "Include key components, their interactions, and the overall architecture. "
+        "Provide the description in clear, concise language suitable for software developers.\n\n"
         f"C# Codebase:\n{combined_code}\n\nProject Description:"
     )
-    project_description = call_openai_api(prompt)
+    project_description = call_bedrock_api(prompt)
     return project_description
 
 
 def generate_high_level_design(project_description):
     print_step("Generating high-level design.")
     prompt = (
-        "You are a software architect. Using the following project description, create a detailed high-level design for a Python "
-        "implementation of the project. The design should focus on simplicity, efficiency, and adherence to Python best practices. "
-        "Include suggestions for using SQLAlchemy for database interactions, FastAPI for HTTP endpoints, and pytest for testing.\n\n"
+        "As a software architect, create a detailed high-level design for a Python implementation of the project described below. "
+        "The design should focus on simplicity, efficiency, and adherence to Python best practices. "
+        "Include suggestions for using SQLAlchemy for database interactions, FastAPI for HTTP endpoints, and pytest for testing. "
+        "Present the design in a structured format, outlining modules, classes, and key functions.\n\n"
         f"Project Description:\n{project_description}\n\nHigh-Level Design:"
     )
-    design = call_openai_api(prompt)
+    design = call_bedrock_api(prompt)
     return design
 
 
 def implement_python_project(design, output_dir):
     print_step("Implementing Python project based on the design.")
     prompt = (
-        "You are an expert Python developer. Implement the Python project based on the following high-level design. "
+        "As an expert Python developer, implement the Python project based on the high-level design provided below. "
         "Use SQLAlchemy for database interactions, FastAPI for HTTP endpoints, and pytest for tests. "
-        "Ensure the code follows Python conventions, is well-documented, and passes linting. "
+        "Ensure the code follows Python conventions, is well-documented with comments, and passes linting. "
         "Provide the code files in the format:\n\n[filename.py]\n<code>\n\n"
         f"High-Level Design:\n{design}\n\nPython Code:"
     )
-    response_content = call_openai_api(prompt)
+    response_content = call_bedrock_api(prompt)
     code_files = parse_code_files_from_response(response_content)
     for file_name, code in code_files.items():
         sanitized_file_name = sanitize_filename(file_name)
@@ -196,12 +199,13 @@ def generate_unit_tests(output_dir):
 
 def generate_unit_test(code):
     prompt = (
-        "You are an expert Python developer specializing in writing unit tests using pytest. "
-        "Write comprehensive unit tests for the following Python code. Ensure the tests cover all significant functionality and edge cases. "
-        "Provide the test code in a lint-compliant format.\n\n"
+        "As an expert Python developer specializing in writing unit tests using pytest, write comprehensive unit tests for the following Python code. "
+        "Ensure the tests cover all significant functionality and edge cases. "
+        "Include any test-related explanations as Python code comments. "
+        "Provide only the test code without additional explanations.\n\n"
         f"Python Code:\n{code}\n\nPytest Unit Tests:"
     )
-    unit_test_code = call_openai_api(prompt)
+    unit_test_code = call_bedrock_api(prompt)
     return unit_test_code
 
 
@@ -216,22 +220,33 @@ def evaluate_project(project_dir):
     return num_files
 
 
-def call_openai_api(prompt, model='gpt-4'):
+def call_bedrock_api(prompt):
+    model_name = os.environ.get('MODEL', 'default-model-name')
+    client = boto3.client('bedrock-runtime')
+    body = json.dumps({
+        "prompt": prompt,
+        "max_gen_len": 2048,
+        "temperature": 0.25,
+    })
     max_retries = 5
     retry_delay = 1  # Start with 1 second delay
     for attempt in range(max_retries):
         try:
-            response = client.chat.completions.create(model=model,
-            messages=[
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0)
-            return response.choices[0].message.content.strip()
-        except (RateLimitError, APIError) as e:
-            print_step(f"API error: {e}. Retrying in {retry_delay} seconds...")
+            response = client.invoke_model(
+                modelId=model_name,
+                contentType='application/json',
+                accept='application/json',
+                body=body.encode('utf-8')
+            )
+            body = response['body'].read().decode('utf-8').strip()
+            result = json.loads(body)['generation']
+            return result
+        except ClientError as e:
+            error_code = e.response['Error']['Code']
+            print_step(f"API error: {error_code}. Retrying in {retry_delay} seconds...")
             time.sleep(retry_delay)
             retry_delay *= 2  # Exponential backoff
-    print_step("Failed to get a valid response from OpenAI API.")
+    print_step("Failed to get a valid response from AWS Bedrock API.")
     return ''
 
 
