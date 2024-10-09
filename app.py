@@ -1,9 +1,9 @@
-import argparse
-import boto3
-import json
 import os
 import time
-from botocore.exceptions import ClientError
+import argparse
+import re
+import torch
+from transformers import pipeline, AutoModelForCausalLM, AutoTokenizer
 
 
 def print_step(step):
@@ -29,6 +29,9 @@ def strategy_file_by_file_translation(dotnet_files, project_path, output_dir):
             code = f.read()
         print_step(f"Translating {file_path}.")
         translated_code = translate_code(code)
+        if not translated_code:
+            print_step(f"Translation failed for {file_path}. Skipping.")
+            continue
         relative_path = os.path.relpath(file_path, project_path)
         relative_path = os.path.normpath(relative_path)
         output_path = os.path.join(output_dir, relative_path)
@@ -52,6 +55,9 @@ def strategy_simplify_python_app(strategy1_output_dir, output_dir):
             code = f.read()
         print_step(f"Simplifying {file_path}.")
         simplified_code = simplify_python_code(code)
+        if not simplified_code:
+            print_step(f"Simplification failed for {file_path}. Skipping.")
+            continue
         relative_path = os.path.relpath(file_path, strategy1_output_dir)
         output_path = os.path.join(output_dir, relative_path)
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -63,8 +69,14 @@ def strategy_simplify_python_app(strategy1_output_dir, output_dir):
 def strategy_reimplement_from_design(dotnet_files, output_dir):
     print_step("Starting Strategy 2: Reimplementing from high-level design.")
     project_description = extract_project_description(dotnet_files)
+    if not project_description:
+        print_step("Failed to extract project description. Skipping Strategy 2.")
+        return
     print_step("Generating high-level design.")
     design = generate_high_level_design(project_description)
+    if not design:
+        print_step("Failed to generate high-level design. Skipping Strategy 2.")
+        return
     print_step("Implementing Python project based on the design.")
     implement_python_project(design, output_dir)
     print_step("Strategy 2 completed.")
@@ -73,29 +85,31 @@ def strategy_reimplement_from_design(dotnet_files, output_dir):
 def translate_code(code):
     print_step("Using LLM to translate code.")
     prompt = (
-        "As an expert software engineer proficient in both C# and Python, "
-        "your task is to convert the following C# code to Python. "
+        "You are an expert software engineer proficient in both C# and Python. "
+        "Your task is to convert the following C# code to Python. "
         "Ensure that functionality is preserved, unnecessary complexity is simplified, "
         "and the code follows Python best practices and conventions. "
         "Include any explanatory comments as Python code comments. "
-        "Provide only the Python code without additional explanations.\n\n"
-        f"C# Code:\n{code}\n\nPython Code:"
+        "Provide only the Python code between <BEGIN_PYTHON_CODE> and <END_PYTHON_CODE> markers.\n\n"
+        f"C# Code:\n{code}\n\n<BEGIN_PYTHON_CODE>\n"
     )
-    response = call_bedrock_api(prompt)
-    return response
+    response = call_local_llm(prompt)
+    translated_code = extract_code_from_response(response, "<BEGIN_PYTHON_CODE>", "<END_PYTHON_CODE>")
+    return translated_code
 
 
 def simplify_python_code(code):
     print_step("Using LLM to simplify Python code.")
     prompt = (
-        "As an experienced Python developer, refactor the following Python code to enhance simplicity and efficiency. "
+        "You are an experienced Python developer. Refactor the following Python code to enhance simplicity and efficiency. "
         "Introduce SQLAlchemy for database interactions, FastAPI for HTTP endpoints, and pytest for unit testing where appropriate. "
         "Ensure the refactored code preserves the original functionality, follows Python best practices, and is lint-compliant. "
         "Include any explanations or notes as Python code comments. "
-        "Provide only the refactored Python code without additional explanations.\n\n"
-        f"Original Python Code:\n{code}\n\nRefactored Python Code:"
+        "Provide only the refactored Python code between <BEGIN_REFACTORED_CODE> and <END_REFACTORED_CODE> markers.\n\n"
+        f"Original Python Code:\n{code}\n\n<BEGIN_REFACTORED_CODE>\n"
     )
-    simplified_code = call_bedrock_api(prompt)
+    response = call_local_llm(prompt)
+    simplified_code = extract_code_from_response(response, "<BEGIN_REFACTORED_CODE>", "<END_REFACTORED_CODE>")
     return simplified_code
 
 
@@ -108,39 +122,44 @@ def extract_project_description(dotnet_files):
         code_snippets.append(code)
     combined_code = "\n".join(code_snippets)
     prompt = (
-        "As a senior software analyst, provide a detailed, high-level description of the project's functionality based on the following C# codebase. "
+        "You are a senior software analyst. Provide a detailed, high-level description of the project's functionality based on the following C# codebase. "
         "Include key components, their interactions, and the overall architecture. "
-        "Provide the description in clear, concise language suitable for software developers.\n\n"
-        f"C# Codebase:\n{combined_code}\n\nProject Description:"
+        "Provide the description in clear, concise language suitable for software developers. "
+        "Provide the description between <BEGIN_PROJECT_DESCRIPTION> and <END_PROJECT_DESCRIPTION> markers.\n\n"
+        f"C# Codebase:\n{combined_code}\n\n<BEGIN_PROJECT_DESCRIPTION>\n"
     )
-    project_description = call_bedrock_api(prompt)
+    response = call_local_llm(prompt)
+    project_description = extract_code_from_response(response, "<BEGIN_PROJECT_DESCRIPTION>", "<END_PROJECT_DESCRIPTION>")
     return project_description
 
 
 def generate_high_level_design(project_description):
     print_step("Generating high-level design.")
     prompt = (
-        "As a software architect, create a detailed high-level design for a Python implementation of the project described below. "
+        "You are a software architect. Create a detailed high-level design for a Python implementation of the project described below. "
         "The design should focus on simplicity, efficiency, and adherence to Python best practices. "
         "Include suggestions for using SQLAlchemy for database interactions, FastAPI for HTTP endpoints, and pytest for testing. "
-        "Present the design in a structured format, outlining modules, classes, and key functions.\n\n"
-        f"Project Description:\n{project_description}\n\nHigh-Level Design:"
+        "Present the design in a structured format, outlining modules, classes, and key functions. "
+        "Provide the design between <BEGIN_HIGH_LEVEL_DESIGN> and <END_HIGH_LEVEL_DESIGN> markers.\n\n"
+        f"Project Description:\n{project_description}\n\n<BEGIN_HIGH_LEVEL_DESIGN>\n"
     )
-    design = call_bedrock_api(prompt)
+    response = call_local_llm(prompt)
+    design = extract_code_from_response(response, "<BEGIN_HIGH_LEVEL_DESIGN>", "<END_HIGH_LEVEL_DESIGN>")
     return design
 
 
 def implement_python_project(design, output_dir):
     print_step("Implementing Python project based on the design.")
     prompt = (
-        "As an expert Python developer, implement the Python project based on the high-level design provided below. "
+        "You are an expert Python developer. Implement the Python project based on the high-level design provided below. "
         "Use SQLAlchemy for database interactions, FastAPI for HTTP endpoints, and pytest for tests. "
         "Ensure the code follows Python conventions, is well-documented with comments, and passes linting. "
-        "Provide the code files in the format:\n\n[filename.py]\n<code>\n\n"
-        f"High-Level Design:\n{design}\n\nPython Code:"
+        "Provide the code files in the following format:\n\n"
+        "<BEGIN_FILE: filename.py>\n<code>\n<END_FILE>\n\n"
+        f"High-Level Design:\n{design}\n\n<BEGIN_PYTHON_CODE>\n"
     )
-    response_content = call_bedrock_api(prompt)
-    code_files = parse_code_files_from_response(response_content)
+    response_content = call_local_llm(prompt)
+    code_files = parse_code_files_from_response_multiple_files(response_content)
     for file_name, code in code_files.items():
         sanitized_file_name = sanitize_filename(file_name)
         output_path = os.path.join(output_dir, sanitized_file_name)
@@ -149,32 +168,16 @@ def implement_python_project(design, output_dir):
             f.write(code)
 
 
-def parse_code_files_from_response(response_content):
+def parse_code_files_from_response_multiple_files(response_content):
     print_step("Parsing code files from LLM response.")
     code_files = {}
-    lines = response_content.splitlines()
-    current_filename = None
-    code_lines = []
-    for line in lines:
-        line = line.strip()
-        if line.startswith('[') and line.endswith(']'):
-            if current_filename and code_lines:
-                code_files[current_filename] = '\n'.join(code_lines).strip()
-                code_lines = []
-            current_filename = line[1:-1]
-        else:
-            code_lines.append(line)
-    if current_filename and code_lines:
-        code_files[current_filename] = '\n'.join(code_lines).strip()
+    pattern = r"<BEGIN_FILE:\s*(.*?)\s*>\n(.*?)\n<END_FILE>"
+    matches = re.finditer(pattern, response_content, re.DOTALL)
+    for match in matches:
+        filename = match.group(1).strip()
+        code = match.group(2).strip()
+        code_files[filename] = code
     return code_files
-
-
-def sanitize_filename(filename):
-    filename = filename.lstrip('/\\')
-    filename = os.path.normpath(filename)
-    if '..' in filename or filename.startswith(('/', '\\')):
-        filename = os.path.basename(filename)
-    return filename
 
 
 def generate_unit_tests(output_dir):
@@ -190,6 +193,9 @@ def generate_unit_tests(output_dir):
             code = f.read()
         print_step(f"Generating unit test for {file_path}.")
         unit_test_code = generate_unit_test(code)
+        if not unit_test_code:
+            print_step(f"Unit test generation failed for {file_path}. Skipping.")
+            continue
         test_file_name = f'test_{os.path.basename(file_path)}'
         test_file_path = os.path.join(os.path.dirname(file_path), test_file_name)
         os.makedirs(os.path.dirname(test_file_path), exist_ok=True)
@@ -199,14 +205,34 @@ def generate_unit_tests(output_dir):
 
 def generate_unit_test(code):
     prompt = (
-        "As an expert Python developer specializing in writing unit tests using pytest, write comprehensive unit tests for the following Python code. "
+        "You are an expert Python developer specializing in writing unit tests using pytest. Write comprehensive unit tests for the following Python code. "
         "Ensure the tests cover all significant functionality and edge cases. "
         "Include any test-related explanations as Python code comments. "
-        "Provide only the test code without additional explanations.\n\n"
-        f"Python Code:\n{code}\n\nPytest Unit Tests:"
+        "Provide only the test code between <BEGIN_UNIT_TEST> and <END_UNIT_TEST> markers.\n\n"
+        f"Python Code:\n{code}\n\n<BEGIN_UNIT_TEST>\n"
     )
-    unit_test_code = call_bedrock_api(prompt)
+    unit_test_code = call_local_llm(prompt)
+    unit_test_code = extract_code_from_response(unit_test_code, "<BEGIN_UNIT_TEST>", "<END_UNIT_TEST>")
     return unit_test_code
+
+
+def extract_code_from_response(response, start_marker, end_marker):
+    pattern = re.escape(start_marker) + r'(.*?)' + re.escape(end_marker)
+    match = re.search(pattern, response, re.DOTALL | re.MULTILINE)
+    if match:
+        code = match.group(1).strip()
+        return code
+    else:
+        # If markers are not found, assume the whole response is code
+        return response.strip()
+
+
+def sanitize_filename(filename):
+    filename = filename.lstrip('/\\')
+    filename = os.path.normpath(filename)
+    if '..' in filename or filename.startswith(('/', '\\')):
+        filename = os.path.basename(filename)
+    return filename
 
 
 def evaluate_project(project_dir):
@@ -220,41 +246,45 @@ def evaluate_project(project_dir):
     return num_files
 
 
-def call_bedrock_api(prompt):
-    model_name = os.environ.get('MODEL', 'default-model-name')
-    client = boto3.client('bedrock-runtime')
-    body = json.dumps({
-        "prompt": prompt,
-        "max_gen_len": 2048,
-        "temperature": 0.25,
-    })
-    max_retries = 5
-    retry_delay = 1  # Start with 1 second delay
+def call_local_llm(prompt):
+    max_retries = 3
+    retry_delay = 1  # Start with 1-second delay
+
     for attempt in range(max_retries):
         try:
-            response = client.invoke_model(
-                modelId=model_name,
-                contentType='application/json',
-                accept='application/json',
-                body=body.encode('utf-8')
-            )
-            body = response['body'].read().decode('utf-8').strip()
-            result = json.loads(body)['generation']
-            return result
-        except ClientError as e:
-            error_code = e.response['Error']['Code']
-            print_step(f"API error: {error_code}. Retrying in {retry_delay} seconds...")
+            print_step("Generating response from the local LLM...")
+            response = generator(prompt, max_new_tokens=512, do_sample=True, temperature=0.7, num_return_sequences=1)
+            result = response[0]['generated_text']
+            # Remove the prompt from the generated text if it is included
+            if result.startswith(prompt):
+                result = result[len(prompt):]
+            return result.strip()
+        except Exception as e:
+            print_step(f"Error generating response: {e}. Retrying in {retry_delay} seconds...")
             time.sleep(retry_delay)
             retry_delay *= 2  # Exponential backoff
-    print_step("Failed to get a valid response from AWS Bedrock API.")
+    print_step("Failed to get a valid response from the local LLM.")
     return ''
 
 
+def load_model():
+    model_name = os.environ.get('MODEL', 'EleutherAI/gpt-neo-2.7B')
+    print_step(f"Loading the local LLM model '{model_name}'. This may take some time...")
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForCausalLM.from_pretrained(model_name)
+    device = 0 if torch.cuda.is_available() else -1
+    generator = pipeline('text-generation', model=model, tokenizer=tokenizer, device=device)
+    return generator
+
+
 def main():
-    parser = argparse.ArgumentParser(description='Port a .NET project to Python using LLMs.')
+    parser = argparse.ArgumentParser(description='Port a .NET project to Python using a local LLM.')
     parser.add_argument('project_path', help='Path to the .NET project git repository.')
     parser.add_argument('--output_dir', default='python_project', help='Directory to output the Python project.')
     args = parser.parse_args()
+
+    global generator
+    generator = load_model()
 
     project_path = os.path.abspath(args.project_path)
     output_dir = os.path.abspath(args.output_dir)
