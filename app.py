@@ -3,6 +3,7 @@ import time
 import argparse
 import re
 import torch
+from tqdm import tqdm
 from transformers import pipeline, AutoModelForCausalLM, AutoTokenizer
 
 
@@ -24,18 +25,20 @@ def analyze_dotnet_project(project_path):
 
 def strategy_file_by_file_translation(dotnet_files, project_path, output_dir):
     print_step("Starting Strategy 1: File-by-file translation.")
-    for file_path in dotnet_files:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            code = f.read()
-        print_step(f"Translating {file_path}.")
-        translated_code = translate_code(code)
-        if not translated_code:
-            print_step(f"Translation failed for {file_path}. Skipping.")
-            continue
+    for file_path in tqdm(dotnet_files, desc="Translating files"):
         relative_path = os.path.relpath(file_path, project_path)
         relative_path = os.path.normpath(relative_path)
         output_path = os.path.join(output_dir, relative_path)
         output_path = os.path.splitext(output_path)[0] + '.py'
+        if os.path.exists(output_path):
+            print_step(f"File {output_path} already exists. Skipping.")
+            continue
+        with open(file_path, 'r', encoding='utf-8') as f:
+            code = f.read()
+        translated_code = translate_code(code)
+        if not translated_code:
+            print_step(f"Translation failed for {file_path}. Skipping.")
+            continue
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(translated_code)
@@ -50,16 +53,18 @@ def strategy_simplify_python_app(strategy1_output_dir, output_dir):
             if file.endswith('.py'):
                 file_path = os.path.join(root, file)
                 python_files.append(file_path)
-    for file_path in python_files:
+    for file_path in tqdm(python_files, desc="Simplifying files"):
+        relative_path = os.path.relpath(file_path, strategy1_output_dir)
+        output_path = os.path.join(output_dir, relative_path)
+        if os.path.exists(output_path):
+            print_step(f"File {output_path} already exists. Skipping.")
+            continue
         with open(file_path, 'r', encoding='utf-8') as f:
             code = f.read()
-        print_step(f"Simplifying {file_path}.")
         simplified_code = simplify_python_code(code)
         if not simplified_code:
             print_step(f"Simplification failed for {file_path}. Skipping.")
             continue
-        relative_path = os.path.relpath(file_path, strategy1_output_dir)
-        output_path = os.path.join(output_dir, relative_path)
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(simplified_code)
@@ -72,12 +77,10 @@ def strategy_reimplement_from_design(dotnet_files, output_dir):
     if not project_description:
         print_step("Failed to extract project description. Skipping Strategy 2.")
         return
-    print_step("Generating high-level design.")
     design = generate_high_level_design(project_description)
     if not design:
         print_step("Failed to generate high-level design. Skipping Strategy 2.")
         return
-    print_step("Implementing Python project based on the design.")
     implement_python_project(design, output_dir)
     print_step("Strategy 2 completed.")
 
@@ -163,6 +166,9 @@ def implement_python_project(design, output_dir):
     for file_name, code in code_files.items():
         sanitized_file_name = sanitize_filename(file_name)
         output_path = os.path.join(output_dir, sanitized_file_name)
+        if os.path.exists(output_path):
+            print_step(f"File {output_path} already exists. Skipping.")
+            continue
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(code)
@@ -188,19 +194,22 @@ def generate_unit_tests(output_dir):
             if file.endswith('.py') and not file.startswith('test_'):
                 file_path = os.path.join(root, file)
                 python_files.append(file_path)
-    for file_path in python_files:
+    for file_path in tqdm(python_files, desc="Generating unit tests"):
+        test_file_name = f'test_{os.path.basename(file_path)}'
+        test_file_path = os.path.join(os.path.dirname(file_path), test_file_name)
+        if os.path.exists(test_file_path):
+            print_step(f"File {test_file_path} already exists. Skipping.")
+            continue
         with open(file_path, 'r', encoding='utf-8') as f:
             code = f.read()
-        print_step(f"Generating unit test for {file_path}.")
         unit_test_code = generate_unit_test(code)
         if not unit_test_code:
             print_step(f"Unit test generation failed for {file_path}. Skipping.")
             continue
-        test_file_name = f'test_{os.path.basename(file_path)}'
-        test_file_path = os.path.join(os.path.dirname(file_path), test_file_name)
         os.makedirs(os.path.dirname(test_file_path), exist_ok=True)
         with open(test_file_path, 'w', encoding='utf-8') as f:
             f.write(unit_test_code)
+    print_step("Unit test generation completed.")
 
 
 def generate_unit_test(code):
@@ -223,7 +232,6 @@ def extract_code_from_response(response, start_marker, end_marker):
         code = match.group(1).strip()
         return code
     else:
-        # If markers are not found, assume the whole response is code
         return response.strip()
 
 
@@ -252,13 +260,13 @@ def call_local_llm(prompt):
 
     for attempt in range(max_retries):
         try:
-            print_step("Generating response from the local LLM...")
-            response = generator(prompt, max_new_tokens=512, do_sample=True, temperature=0.7, num_return_sequences=1)
-            result = response[0]['generated_text']
+            response = ''
+            for output in generator(prompt, max_new_tokens=512, do_sample=True, temperature=0.7, num_return_sequences=1):
+                response += output['generated_text']
             # Remove the prompt from the generated text if it is included
-            if result.startswith(prompt):
-                result = result[len(prompt):]
-            return result.strip()
+            if response.startswith(prompt):
+                response = response[len(prompt):]
+            return response.strip()
         except Exception as e:
             print_step(f"Error generating response: {e}. Retrying in {retry_delay} seconds...")
             time.sleep(retry_delay)
@@ -271,6 +279,8 @@ def load_model():
     model_name = os.environ.get('MODEL', 'EleutherAI/gpt-neo-2.7B')
     print_step(f"Loading the local LLM model '{model_name}'. This may take some time...")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
+    # Prevent the warning about pad_token_id
+    tokenizer.pad_token_id = tokenizer.eos_token_id
     model = AutoModelForCausalLM.from_pretrained(model_name)
     device = 0 if torch.cuda.is_available() else -1
     generator = pipeline('text-generation', model=model, tokenizer=tokenizer, device=device)
