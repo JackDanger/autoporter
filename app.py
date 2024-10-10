@@ -31,19 +31,20 @@ def analyze_dotnet_project(project_path):
 
 def strategy_file_by_file_translation(dotnet_files, project_path, output_dir):
     print_step("Starting Strategy 1: File-by-file translation.")
-    for file_path in tqdm(dotnet_files, desc="Translating files"):
+    for file_path in tqdm(dotnet_files, desc="Translating files", unit="file"):
         relative_path = os.path.relpath(file_path, project_path)
         relative_path = os.path.normpath(relative_path)
         output_path = os.path.join(output_dir, relative_path)
         output_path = os.path.splitext(output_path)[0] + '.py'
         if os.path.exists(output_path):
-            print_step(f"File {output_path} already exists. Skipping.")
+            tqdm.write(f"Skipping existing file: {output_path}")
             continue
+        tqdm.write(f"Translating {file_path} -> {output_path}")
         with open(file_path, 'r', encoding='utf-8') as f:
             code = f.read()
         translated_code = translate_code(code)
         if not translated_code:
-            print_step(f"Translation failed for {file_path}. Skipping.")
+            tqdm.write(f"Translation failed for {file_path}. Skipping.")
             continue
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         with open(output_path, 'w', encoding='utf-8') as f:
@@ -59,17 +60,18 @@ def strategy_simplify_python_app(strategy1_output_dir, output_dir):
             if file.endswith('.py'):
                 file_path = os.path.join(root, file)
                 python_files.append(file_path)
-    for file_path in tqdm(python_files, desc="Simplifying files"):
+    for file_path in tqdm(python_files, desc="Simplifying files", unit="file"):
         relative_path = os.path.relpath(file_path, strategy1_output_dir)
         output_path = os.path.join(output_dir, relative_path)
         if os.path.exists(output_path):
-            print_step(f"File {output_path} already exists. Skipping.")
+            tqdm.write(f"Skipping existing file: {output_path}")
             continue
+        tqdm.write(f"Simplifying {file_path} -> {output_path}")
         with open(file_path, 'r', encoding='utf-8') as f:
             code = f.read()
         simplified_code = simplify_python_code(code)
         if not simplified_code:
-            print_step(f"Simplification failed for {file_path}. Skipping.")
+            tqdm.write(f"Simplification failed for {file_path}. Skipping.")
             continue
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         with open(output_path, 'w', encoding='utf-8') as f:
@@ -112,9 +114,8 @@ def strategy_reimplement_from_design(dotnet_files, project_dir, output_dir):
 def translate_code(code):
     print_step("Using LLM to translate code.")
     prompt = (
-        "As an expert software engineer proficient in both C# and Python, "
-        "convert the following C# code to Python, ensuring functionality is preserved. "
-        "Simplify unnecessary complexity, follow Python best practices, and include explanatory comments. "
+        "As an expert software engineer proficient in C# and Python, convert the following C# code to Python. "
+        "Ensure functionality is preserved, simplify unnecessary complexity, follow Python best practices, removing redundancies and simplifying. "
         "Provide only the Python code between <BEGIN_PYTHON_CODE> and <END_PYTHON_CODE> markers.\n\n"
         f"<BEGIN_CSHARP_CODE>\n{code}\n<END_CSHARP_CODE>\n\n<BEGIN_PYTHON_CODE>\n"
     )
@@ -128,12 +129,11 @@ def translate_code(code):
 def simplify_python_code(code):
     print_step("Using LLM to simplify Python code.")
     prompt = (
-        "As an experienced Python developer, refactor the following Python code to enhance simplicity and efficiency. "
-        "Introduce SQLAlchemy for database interactions, FastAPI for HTTP endpoints, and pytest for unit testing where appropriate. "
-        "Ensure the refactored code preserves the original functionality, follows Python best practices, and is lint-compliant. "
-        "Include explanations or notes as Python code comments. "
-        "Provide only the refactored Python code between <BEGIN_REFACTORED_CODE> and <END_REFACTORED_CODE> markers.\n\n"
-        f"<BEGIN_ORIGINAL_PYTHON_CODE>\n{code}\n<END_ORIGINAL_PYTHON_CODE>\n\n<BEGIN_REFACTORED_CODE>\n"
+        "As an experienced Python developer, refactor the following code to enhance simplicity and efficiency. "
+        "Use SQLAlchemy for database interactions, FastAPI for HTTP endpoints, and pytest for unit testing where appropriate. "
+        "Ensure the refactored code preserves functionality, follows best practices, and is lint-compliant. "
+        "Include explanations as comments. Provide only the refactored code between <BEGIN_REFACTORED_CODE> and <END_REFACTORED_CODE> markers.\n\n"
+        f"<BEGIN_ORIGINAL_CODE>\n{code}\n<END_ORIGINAL_CODE>\n\n<BEGIN_REFACTORED_CODE>\n"
     )
     response = call_local_llm(prompt)
     simplified_code = extract_code_from_response(
@@ -145,20 +145,22 @@ def simplify_python_code(code):
 def extract_project_description(dotnet_files, project_dir, output_dir):
     print_step("Extracting project description from C# source files.")
     partial_descriptions = []
-    for file_path in dotnet_files:
+    for file_path in tqdm(dotnet_files, desc="Summarizing C# files", unit="file"):
         relative_path = os.path.relpath(file_path, project_dir)
         output_path = f"{os.path.join(output_dir, 'descriptions', relative_path)}.description"
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         if os.path.exists(output_path):
             with open(output_path, 'r') as f:
                 summary_text = f.read()
+            tqdm.write(f"Using existing summary for {file_path}")
         else:
             with open(file_path, 'r', encoding='utf-8') as f:
                 code = f.read()
             prompt = (
-                "As a senior software analyst, provide a concise summary of the following C# code file. "
-                "Focus on the file's purpose, its inputs and outputs (such as public classes, methods, properties), "
-                "and important business logic. Ignore boilerplate and unimportant details.\n\n"
+                "As a software analyst, produce a concise yet exhaustive summary of the following C# file. "
+                "List key elements using the format '[Type] Name: Purpose', where Type is Class, Method, or Property. "
+                "Include only essential information and use abbreviations to minimize tokens. "
+                "Exclude boilerplate and unimportant details.\n\n"
                 f"<BEGIN_CSHARP_CODE>\n{code}\n<END_CSHARP_CODE>\n\n<BEGIN_FILE_SUMMARY>\n"
             )
             summary = call_local_llm(prompt)
@@ -167,13 +169,13 @@ def extract_project_description(dotnet_files, project_dir, output_dir):
             )
             with open(output_path, 'w') as f:
                 f.write(summary_text)
-        print(f"Described {file_path}")
+            tqdm.write(f"Summarized {file_path}")
         partial_descriptions.append(summary_text)
     combined_description = "\n".join(partial_descriptions)
     prompt = (
-        "As a senior software analyst, based on the following summaries of C# code files, provide a high-level description "
-        "of the project's overall functionality, including key components and their interactions. "
-        "Focus on the main features, architecture, and business logic of the application.\n\n"
+        "As a software analyst, based on the following file summaries, produce a concise and exhaustive high-level description "
+        "of the project's overall functionality. Focus on main features, architecture, and key components and their interactions. "
+        "Present the description in a structured format using bullet points or key-value pairs to minimize tokens.\n\n"
         f"<BEGIN_FILE_SUMMARIES>\n{combined_description}\n<END_FILE_SUMMARIES>\n\n<BEGIN_PROJECT_DESCRIPTION>\n"
     )
     project_description = call_local_llm(prompt)
@@ -186,21 +188,24 @@ def extract_project_description(dotnet_files, project_dir, output_dir):
 def extract_project_description_from_python(python_files, project_dir, output_dir):
     print_step("Extracting project description from simplified Python source files.")
     partial_descriptions = []
-    for file_path in python_files:
+    for file_path in tqdm(python_files, desc="Summarizing Python files", unit="file"):
         relative_path = os.path.relpath(file_path, project_dir)
         output_path = f"{os.path.join(output_dir, 'descriptions', relative_path)}.description"
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         if os.path.exists(output_path):
             with open(output_path, 'r') as f:
                 summary_text = f.read()
+            tqdm.write(f"Using existing summary for {file_path}")
         else:
             with open(file_path, 'r', encoding='utf-8') as f:
                 code = f.read()
             prompt = (
-                "As a senior software analyst, provide a concise summary of the following Python code file. "
-                "Focus on the file's purpose, its inputs and outputs (such as classes, functions, variables), "
-                "and important business logic. Ignore boilerplate and unimportant details.\n\n"
-                f"<BEGIN_PYTHON_CODE>\n{code}\n<END_PYTHON_CODE>\n\n<BEGIN_FILE_SUMMARY>\n"
+                "As a software engineer, summarize the following python file in extremely terse language as if you're "
+                "writing notes to yourself. Jot down the bare minimum, in compact language, that you'll need in order "
+                "create something similar later. Avoid mentioning any of the boilerplate, identify only the most "
+                "important parts. Ignore setup and config that could be guessed if it were missing. Here is the file: \n"
+                f"#filename: {relative_path}\n{code}\n\nEOF\n"
+                "What are your notes for that file? Please give a quick answer and do not repeat yourself.\n"
             )
             summary = call_local_llm(prompt)
             summary_text = extract_code_from_response(
@@ -208,13 +213,13 @@ def extract_project_description_from_python(python_files, project_dir, output_di
             )
             with open(output_path, 'w') as f:
                 f.write(summary_text)
-        print(f"Described {file_path}")
+            tqdm.write(f"Summarized {file_path}")
         partial_descriptions.append(summary_text)
     combined_description = "\n".join(partial_descriptions)
     prompt = (
-        "As a senior software analyst, based on the following summaries of Python code files, provide a high-level description "
-        "of the project's overall functionality, including key components and their interactions. "
-        "Focus on the main features, architecture, and business logic of the application.\n\n"
+        "As a software analyst, based on the following file summaries, produce a concise and exhaustive high-level description "
+        "of the project's overall functionality. Focus on main features, architecture, and key components and their interactions. "
+        "Present the description in a structured format using bullet points or key-value pairs to minimize tokens.\n\n"
         f"<BEGIN_FILE_SUMMARIES>\n{combined_description}\n<END_FILE_SUMMARIES>\n\n<BEGIN_PROJECT_DESCRIPTION>\n"
     )
     project_description = call_local_llm(prompt)
@@ -256,8 +261,9 @@ def implement_python_project(design, output_dir):
         sanitized_file_name = sanitize_filename(file_name)
         output_path = os.path.join(output_dir, sanitized_file_name)
         if os.path.exists(output_path):
-            print_step(f"File {output_path} already exists. Skipping.")
+            print_step(f"Skipping existing file: {output_path}")
             continue
+        print_step(f"Writing file: {output_path}")
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(code)
@@ -283,17 +289,18 @@ def generate_unit_tests(output_dir):
             if file.endswith('.py') and not file.startswith('test_'):
                 file_path = os.path.join(root, file)
                 python_files.append(file_path)
-    for file_path in tqdm(python_files, desc="Generating unit tests"):
+    for file_path in tqdm(python_files, desc="Generating unit tests", unit="file"):
         test_file_name = f'test_{os.path.basename(file_path)}'
         test_file_path = os.path.join(os.path.dirname(file_path), test_file_name)
         if os.path.exists(test_file_path):
-            print_step(f"File {test_file_path} already exists. Skipping.")
+            tqdm.write(f"Skipping existing test file: {test_file_path}")
             continue
+        tqdm.write(f"Generating unit tests for {file_path}")
         with open(file_path, 'r', encoding='utf-8') as f:
             code = f.read()
         unit_test_code = generate_unit_test(code)
         if not unit_test_code:
-            print_step(f"Unit test generation failed for {file_path}. Skipping.")
+            tqdm.write(f"Unit test generation failed for {file_path}. Skipping.")
             continue
         os.makedirs(os.path.dirname(test_file_path), exist_ok=True)
         with open(test_file_path, 'w', encoding='utf-8') as f:
@@ -303,11 +310,10 @@ def generate_unit_tests(output_dir):
 
 def generate_unit_test(code):
     prompt = (
-        "As an expert Python developer specializing in writing unit tests using pytest, write comprehensive unit tests for the following Python code. "
-        "Ensure the tests cover all significant functionality and edge cases. "
-        "Include test-related explanations as Python code comments. "
-        "Provide only the test code between <BEGIN_UNIT_TEST> and <END_UNIT_TEST> markers.\n\n"
-        f"<BEGIN_PYTHON_CODE>\n{code}\n<END_PYTHON_CODE>\n\n<BEGIN_UNIT_TEST>\n"
+        "As an expert Python developer specializing in writing unit tests using pytest, write comprehensive unit tests for the following code. "
+        "Ensure the tests cover significant functionality and edge cases. "
+        "Include explanations as comments. Provide only the test code between <BEGIN_UNIT_TEST> and <END_UNIT_TEST> markers.\n\n"
+        f"<BEGIN_CODE>\n{code}\n<END_CODE>\n\n<BEGIN_UNIT_TEST>\n"
     )
     unit_test_code = call_local_llm(prompt)
     unit_test_code = extract_code_from_response(
@@ -379,14 +385,14 @@ def call_local_llm(prompt):
             generation_thread.start()
 
             response = ''
-            with tqdm(total=max_new_tokens, desc="Generating output", unit="token") as pbar:
-                for new_text in streamer:
-                    response += new_text
-                    tokens_generated = len(tokenizer.encode(new_text, add_special_tokens=False))
-                    pbar.update(tokens_generated)
+            for new_text in streamer:
+                print(new_text, end='', flush=True)
+                response += new_text
             return response.strip()
         except Exception as e:
-            print_step(f"Error generating response: {e}. Retrying in {retry_delay} seconds...")
+            print_step(
+                f"Error generating response: {e}. Retrying in {retry_delay} seconds..."
+            )
             time.sleep(retry_delay)
             retry_delay *= 2  # Exponential backoff
     print_step("Failed to get a valid response from the local LLM.")
@@ -395,7 +401,9 @@ def call_local_llm(prompt):
 
 def load_model():
     model_name = os.environ.get('MODEL', 'EleutherAI/gpt-neo-2.7B')
-    print_step(f"Loading the local LLM model '{model_name}'. This may take some time...")
+    print_step(
+        f"Loading the local LLM model '{model_name}'. This may take some time..."
+    )
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     tokenizer.pad_token_id = tokenizer.eos_token_id
     model = AutoModelForCausalLM.from_pretrained(model_name)
