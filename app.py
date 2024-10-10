@@ -2,9 +2,14 @@ import os
 import time
 import argparse
 import re
+import threading
 import torch
 from tqdm import tqdm
-from transformers import pipeline, AutoModelForCausalLM, AutoTokenizer
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    TextIteratorStreamer,
+)
 
 
 def print_step(step):
@@ -71,9 +76,9 @@ def strategy_simplify_python_app(strategy1_output_dir, output_dir):
     print_step("Strategy 1.1 completed.")
 
 
-def strategy_reimplement_from_design(dotnet_files, output_dir):
+def strategy_reimplement_from_design(dotnet_files, project_dir, output_dir):
     print_step("Starting Strategy 2: Reimplementing from high-level design.")
-    project_description = extract_project_description(dotnet_files)
+    project_description = extract_project_description(dotnet_files, project_dir, output_dir)
     if not project_description:
         print_step("Failed to extract project description. Skipping Strategy 2.")
         return
@@ -88,78 +93,103 @@ def strategy_reimplement_from_design(dotnet_files, output_dir):
 def translate_code(code):
     print_step("Using LLM to translate code.")
     prompt = (
-        "You are an expert software engineer proficient in both C# and Python. "
-        "Your task is to convert the following C# code to Python. "
-        "Ensure that functionality is preserved, unnecessary complexity is simplified, "
-        "and the code follows Python best practices and conventions. "
-        "Include any explanatory comments as Python code comments. "
+        "As an expert software engineer proficient in both C# and Python, "
+        "convert the following C# code to Python, ensuring functionality is preserved. "
+        "Simplify unnecessary complexity, follow Python best practices, and include explanatory comments. "
         "Provide only the Python code between <BEGIN_PYTHON_CODE> and <END_PYTHON_CODE> markers.\n\n"
-        f"C# Code:\n{code}\n\n<BEGIN_PYTHON_CODE>\n"
+        f"<BEGIN_CSHARP_CODE>\n{code}\n<END_CSHARP_CODE>\n\n<BEGIN_PYTHON_CODE>\n"
     )
     response = call_local_llm(prompt)
-    translated_code = extract_code_from_response(response, "<BEGIN_PYTHON_CODE>", "<END_PYTHON_CODE>")
+    translated_code = extract_code_from_response(
+        response, "<BEGIN_PYTHON_CODE>", "<END_PYTHON_CODE>"
+    )
     return translated_code
 
 
 def simplify_python_code(code):
     print_step("Using LLM to simplify Python code.")
     prompt = (
-        "You are an experienced Python developer. Refactor the following Python code to enhance simplicity and efficiency. "
+        "As an experienced Python developer, refactor the following Python code to enhance simplicity and efficiency. "
         "Introduce SQLAlchemy for database interactions, FastAPI for HTTP endpoints, and pytest for unit testing where appropriate. "
         "Ensure the refactored code preserves the original functionality, follows Python best practices, and is lint-compliant. "
-        "Include any explanations or notes as Python code comments. "
+        "Include explanations or notes as Python code comments. "
         "Provide only the refactored Python code between <BEGIN_REFACTORED_CODE> and <END_REFACTORED_CODE> markers.\n\n"
-        f"Original Python Code:\n{code}\n\n<BEGIN_REFACTORED_CODE>\n"
+        f"<BEGIN_ORIGINAL_PYTHON_CODE>\n{code}\n<END_ORIGINAL_PYTHON_CODE>\n\n<BEGIN_REFACTORED_CODE>\n"
     )
     response = call_local_llm(prompt)
-    simplified_code = extract_code_from_response(response, "<BEGIN_REFACTORED_CODE>", "<END_REFACTORED_CODE>")
+    simplified_code = extract_code_from_response(
+        response, "<BEGIN_REFACTORED_CODE>", "<END_REFACTORED_CODE>"
+    )
     return simplified_code
 
 
-def extract_project_description(dotnet_files):
+def extract_project_description(dotnet_files, project_dir, output_dir):
     print_step("Extracting project description from source files.")
-    code_snippets = []
+    partial_descriptions = []
     for file_path in dotnet_files:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            code = f.read()
-        code_snippets.append(code)
-    combined_code = "\n".join(code_snippets)
+        relative_path = os.path.relpath(file_path, project_dir)
+        output_path = f"{os.path.join(output_dir, 'descriptions', relative_path)}.description"
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        if os.path.exists(output_path):
+            with open(output_path, 'r') as f:
+                summary_text = f.read()
+        else:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                code = f.read()
+            prompt = (
+                "As a senior software analyst, provide a concise summary of the following C# code file. "
+                "Focus on the file's purpose, its inputs and outputs (such as public classes, methods, properties), "
+                "and important business logic. Ignore boilerplate and unimportant details.\n\n"
+                f"<BEGIN_CSHARP_CODE>\n{code}\n<END_CSHARP_CODE>\n\n<BEGIN_FILE_SUMMARY>\n"
+            )
+            summary = call_local_llm(prompt)
+            summary_text = extract_code_from_response(
+                summary, "<BEGIN_FILE_SUMMARY>", "<END_FILE_SUMMARY>"
+            )
+            with open(output_path, 'w') as f:
+                f.write(summary_text)
+        print(f"described {file_path}")
+        partial_descriptions.append(summary_text)
+    combined_description = "\n".join(partial_descriptions)
+    # Summarize the combined descriptions to produce a high-level project description
     prompt = (
-        "You are a senior software analyst. Provide a detailed, high-level description of the project's functionality based on the following C# codebase. "
-        "Include key components, their interactions, and the overall architecture. "
-        "Provide the description in clear, concise language suitable for software developers. "
-        "Provide the description between <BEGIN_PROJECT_DESCRIPTION> and <END_PROJECT_DESCRIPTION> markers.\n\n"
-        f"C# Codebase:\n{combined_code}\n\n<BEGIN_PROJECT_DESCRIPTION>\n"
+        "As a senior software analyst, based on the following summaries of C# code files, provide a high-level description "
+        "of the project's overall functionality, including key components and their interactions. "
+        "Focus on the main features, architecture, and business logic of the application.\n\n"
+        f"<BEGIN_FILE_SUMMARIES>\n{combined_description}\n<END_FILE_SUMMARIES>\n\n<BEGIN_PROJECT_DESCRIPTION>\n"
     )
-    response = call_local_llm(prompt)
-    project_description = extract_code_from_response(response, "<BEGIN_PROJECT_DESCRIPTION>", "<END_PROJECT_DESCRIPTION>")
-    return project_description
+    project_description = call_local_llm(prompt)
+    project_description_text = extract_code_from_response(
+        project_description, "<BEGIN_PROJECT_DESCRIPTION>", "<END_PROJECT_DESCRIPTION>"
+    )
+    return project_description_text
 
 
 def generate_high_level_design(project_description):
     print_step("Generating high-level design.")
     prompt = (
-        "You are a software architect. Create a detailed high-level design for a Python implementation of the project described below. "
+        "As a software architect, create a detailed high-level design for a Python implementation of the project described below. "
         "The design should focus on simplicity, efficiency, and adherence to Python best practices. "
         "Include suggestions for using SQLAlchemy for database interactions, FastAPI for HTTP endpoints, and pytest for testing. "
-        "Present the design in a structured format, outlining modules, classes, and key functions. "
-        "Provide the design between <BEGIN_HIGH_LEVEL_DESIGN> and <END_HIGH_LEVEL_DESIGN> markers.\n\n"
-        f"Project Description:\n{project_description}\n\n<BEGIN_HIGH_LEVEL_DESIGN>\n"
+        "Present the design in a structured format, outlining modules, classes, key functions, and their relationships.\n\n"
+        f"<BEGIN_PROJECT_DESCRIPTION>\n{project_description}\n<END_PROJECT_DESCRIPTION>\n\n<BEGIN_HIGH_LEVEL_DESIGN>\n"
     )
     response = call_local_llm(prompt)
-    design = extract_code_from_response(response, "<BEGIN_HIGH_LEVEL_DESIGN>", "<END_HIGH_LEVEL_DESIGN>")
+    design = extract_code_from_response(
+        response, "<BEGIN_HIGH_LEVEL_DESIGN>", "<END_HIGH_LEVEL_DESIGN>"
+    )
     return design
 
 
 def implement_python_project(design, output_dir):
     print_step("Implementing Python project based on the design.")
     prompt = (
-        "You are an expert Python developer. Implement the Python project based on the high-level design provided below. "
+        "As an expert Python developer, implement the Python project based on the high-level design provided below. "
         "Use SQLAlchemy for database interactions, FastAPI for HTTP endpoints, and pytest for tests. "
         "Ensure the code follows Python conventions, is well-documented with comments, and passes linting. "
         "Provide the code files in the following format:\n\n"
         "<BEGIN_FILE: filename.py>\n<code>\n<END_FILE>\n\n"
-        f"High-Level Design:\n{design}\n\n<BEGIN_PYTHON_CODE>\n"
+        f"<BEGIN_HIGH_LEVEL_DESIGN>\n{design}\n<END_HIGH_LEVEL_DESIGN>\n\n<BEGIN_PYTHON_CODE>\n"
     )
     response_content = call_local_llm(prompt)
     code_files = parse_code_files_from_response_multiple_files(response_content)
@@ -214,14 +244,16 @@ def generate_unit_tests(output_dir):
 
 def generate_unit_test(code):
     prompt = (
-        "You are an expert Python developer specializing in writing unit tests using pytest. Write comprehensive unit tests for the following Python code. "
+        "As an expert Python developer specializing in writing unit tests using pytest, write comprehensive unit tests for the following Python code. "
         "Ensure the tests cover all significant functionality and edge cases. "
-        "Include any test-related explanations as Python code comments. "
+        "Include test-related explanations as Python code comments. "
         "Provide only the test code between <BEGIN_UNIT_TEST> and <END_UNIT_TEST> markers.\n\n"
-        f"Python Code:\n{code}\n\n<BEGIN_UNIT_TEST>\n"
+        f"<BEGIN_PYTHON_CODE>\n{code}\n<END_PYTHON_CODE>\n\n<BEGIN_UNIT_TEST>\n"
     )
     unit_test_code = call_local_llm(prompt)
-    unit_test_code = extract_code_from_response(unit_test_code, "<BEGIN_UNIT_TEST>", "<END_UNIT_TEST>")
+    unit_test_code = extract_code_from_response(
+        unit_test_code, "<BEGIN_UNIT_TEST>", "<END_UNIT_TEST>"
+    )
     return unit_test_code
 
 
@@ -257,15 +289,46 @@ def evaluate_project(project_dir):
 def call_local_llm(prompt):
     max_retries = 3
     retry_delay = 1  # Start with 1-second delay
+    max_new_tokens = 512
 
     for attempt in range(max_retries):
         try:
+            print_step("Tokenizing input...")
+            # Tokenize input and get attention mask
+            inputs = tokenizer(prompt, return_tensors='pt', truncation=True)
+            input_ids = inputs.input_ids.to(device)
+            attention_mask = inputs.attention_mask.to(device)
+            total_input_tokens = input_ids.shape[-1]
+            print_step(f"Input has {total_input_tokens} tokens.")
+
+            # Set up streamer for streaming output
+            streamer = TextIteratorStreamer(
+                tokenizer, skip_prompt=True, skip_special_tokens=True
+            )
+
+            generation_kwargs = dict(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=max_new_tokens,
+                do_sample=True,
+                temperature=0.7,
+                streamer=streamer,
+            )
+
+            print_step("Generating response...")
+            # Generate in a separate thread to allow streaming output
+            generation_thread = threading.Thread(
+                target=model.generate, kwargs=generation_kwargs
+            )
+            generation_thread.start()
+
             response = ''
-            for output in generator(prompt, max_new_tokens=512, do_sample=True, temperature=0.7, num_return_sequences=1):
-                response += output['generated_text']
-            # Remove the prompt from the generated text if it is included
-            if response.startswith(prompt):
-                response = response[len(prompt):]
+            with tqdm(total=max_new_tokens, desc="Generating output", unit="token") as pbar:
+                for new_text in streamer:
+                    response += new_text
+                    # Update progress bar based on the number of tokens generated
+                    tokens_generated = len(tokenizer.encode(new_text, add_special_tokens=False))
+                    pbar.update(tokens_generated)
             return response.strip()
         except Exception as e:
             print_step(f"Error generating response: {e}. Retrying in {retry_delay} seconds...")
@@ -282,9 +345,9 @@ def load_model():
     # Prevent the warning about pad_token_id
     tokenizer.pad_token_id = tokenizer.eos_token_id
     model = AutoModelForCausalLM.from_pretrained(model_name)
-    device = 0 if torch.cuda.is_available() else -1
-    generator = pipeline('text-generation', model=model, tokenizer=tokenizer, device=device)
-    return generator
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model.to(device)
+    return model, tokenizer, device
 
 
 def main():
@@ -293,8 +356,8 @@ def main():
     parser.add_argument('--output_dir', default='python_project', help='Directory to output the Python project.')
     args = parser.parse_args()
 
-    global generator
-    generator = load_model()
+    global model, tokenizer, device
+    model, tokenizer, device = load_model()
 
     project_path = os.path.abspath(args.project_path)
     output_dir = os.path.abspath(args.output_dir)
@@ -319,7 +382,7 @@ def main():
     # Strategy 2
     strategy2_output_dir = os.path.join(output_dir, 'strategy2')
     os.makedirs(strategy2_output_dir, exist_ok=True)
-    strategy_reimplement_from_design(dotnet_files, strategy2_output_dir)
+    strategy_reimplement_from_design(dotnet_files, project_path, strategy2_output_dir)
     strategy_scores['strategy2'] = evaluate_project(strategy2_output_dir)
 
     # Select the best strategy
