@@ -1,8 +1,9 @@
-import os
-import time
 import argparse
+import os
 import re
 import threading
+import time
+
 import torch
 from tqdm import tqdm
 from transformers import (
@@ -76,11 +77,13 @@ def strategy_simplify_python_app(strategy1_output_dir, output_dir):
     print_step("Strategy 1.1 completed.")
 
 
-def strategy_reimplement_from_design(dotnet_files, project_dir, output_dir):
-    print_step("Starting Strategy 2: Reimplementing from high-level design.")
-    project_description = extract_project_description(dotnet_files, project_dir, output_dir)
+def strategy_reimplement_from_python_summaries(python_files, project_dir, output_dir):
+    print_step("Starting Strategy 2: Reimplementing from simplified Python code summaries.")
+    project_description = extract_project_description_from_python(
+        python_files, project_dir, output_dir
+    )
     if not project_description:
-        print_step("Failed to extract project description. Skipping Strategy 2.")
+        print_step("Failed to extract project description from Python code. Skipping Strategy 2.")
         return
     design = generate_high_level_design(project_description)
     if not design:
@@ -88,6 +91,22 @@ def strategy_reimplement_from_design(dotnet_files, project_dir, output_dir):
         return
     implement_python_project(design, output_dir)
     print_step("Strategy 2 completed.")
+
+
+def strategy_reimplement_from_design(dotnet_files, project_dir, output_dir):
+    print_step("Starting Strategy 3: Reimplementing from high-level design based on C# summaries.")
+    project_description = extract_project_description(
+        dotnet_files, project_dir, output_dir
+    )
+    if not project_description:
+        print_step("Failed to extract project description. Skipping Strategy 3.")
+        return
+    design = generate_high_level_design(project_description)
+    if not design:
+        print_step("Failed to generate high-level design. Skipping Strategy 3.")
+        return
+    implement_python_project(design, output_dir)
+    print_step("Strategy 3 completed.")
 
 
 def translate_code(code):
@@ -124,7 +143,7 @@ def simplify_python_code(code):
 
 
 def extract_project_description(dotnet_files, project_dir, output_dir):
-    print_step("Extracting project description from source files.")
+    print_step("Extracting project description from C# source files.")
     partial_descriptions = []
     for file_path in dotnet_files:
         relative_path = os.path.relpath(file_path, project_dir)
@@ -148,12 +167,52 @@ def extract_project_description(dotnet_files, project_dir, output_dir):
             )
             with open(output_path, 'w') as f:
                 f.write(summary_text)
-        print(f"described {file_path}")
+        print(f"Described {file_path}")
         partial_descriptions.append(summary_text)
     combined_description = "\n".join(partial_descriptions)
-    # Summarize the combined descriptions to produce a high-level project description
     prompt = (
         "As a senior software analyst, based on the following summaries of C# code files, provide a high-level description "
+        "of the project's overall functionality, including key components and their interactions. "
+        "Focus on the main features, architecture, and business logic of the application.\n\n"
+        f"<BEGIN_FILE_SUMMARIES>\n{combined_description}\n<END_FILE_SUMMARIES>\n\n<BEGIN_PROJECT_DESCRIPTION>\n"
+    )
+    project_description = call_local_llm(prompt)
+    project_description_text = extract_code_from_response(
+        project_description, "<BEGIN_PROJECT_DESCRIPTION>", "<END_PROJECT_DESCRIPTION>"
+    )
+    return project_description_text
+
+
+def extract_project_description_from_python(python_files, project_dir, output_dir):
+    print_step("Extracting project description from simplified Python source files.")
+    partial_descriptions = []
+    for file_path in python_files:
+        relative_path = os.path.relpath(file_path, project_dir)
+        output_path = f"{os.path.join(output_dir, 'descriptions', relative_path)}.description"
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        if os.path.exists(output_path):
+            with open(output_path, 'r') as f:
+                summary_text = f.read()
+        else:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                code = f.read()
+            prompt = (
+                "As a senior software analyst, provide a concise summary of the following Python code file. "
+                "Focus on the file's purpose, its inputs and outputs (such as classes, functions, variables), "
+                "and important business logic. Ignore boilerplate and unimportant details.\n\n"
+                f"<BEGIN_PYTHON_CODE>\n{code}\n<END_PYTHON_CODE>\n\n<BEGIN_FILE_SUMMARY>\n"
+            )
+            summary = call_local_llm(prompt)
+            summary_text = extract_code_from_response(
+                summary, "<BEGIN_FILE_SUMMARY>", "<END_FILE_SUMMARY>"
+            )
+            with open(output_path, 'w') as f:
+                f.write(summary_text)
+        print(f"Described {file_path}")
+        partial_descriptions.append(summary_text)
+    combined_description = "\n".join(partial_descriptions)
+    prompt = (
+        "As a senior software analyst, based on the following summaries of Python code files, provide a high-level description "
         "of the project's overall functionality, including key components and their interactions. "
         "Focus on the main features, architecture, and business logic of the application.\n\n"
         f"<BEGIN_FILE_SUMMARIES>\n{combined_description}\n<END_FILE_SUMMARIES>\n\n<BEGIN_PROJECT_DESCRIPTION>\n"
@@ -294,14 +353,12 @@ def call_local_llm(prompt):
     for attempt in range(max_retries):
         try:
             print_step("Tokenizing input...")
-            # Tokenize input and get attention mask
             inputs = tokenizer(prompt, return_tensors='pt', truncation=True)
             input_ids = inputs.input_ids.to(device)
             attention_mask = inputs.attention_mask.to(device)
             total_input_tokens = input_ids.shape[-1]
             print_step(f"Input has {total_input_tokens} tokens.")
 
-            # Set up streamer for streaming output
             streamer = TextIteratorStreamer(
                 tokenizer, skip_prompt=True, skip_special_tokens=True
             )
@@ -316,7 +373,6 @@ def call_local_llm(prompt):
             )
 
             print_step("Generating response...")
-            # Generate in a separate thread to allow streaming output
             generation_thread = threading.Thread(
                 target=model.generate, kwargs=generation_kwargs
             )
@@ -326,7 +382,6 @@ def call_local_llm(prompt):
             with tqdm(total=max_new_tokens, desc="Generating output", unit="token") as pbar:
                 for new_text in streamer:
                     response += new_text
-                    # Update progress bar based on the number of tokens generated
                     tokens_generated = len(tokenizer.encode(new_text, add_special_tokens=False))
                     pbar.update(tokens_generated)
             return response.strip()
@@ -342,7 +397,6 @@ def load_model():
     model_name = os.environ.get('MODEL', 'EleutherAI/gpt-neo-2.7B')
     print_step(f"Loading the local LLM model '{model_name}'. This may take some time...")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    # Prevent the warning about pad_token_id
     tokenizer.pad_token_id = tokenizer.eos_token_id
     model = AutoModelForCausalLM.from_pretrained(model_name)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -351,9 +405,17 @@ def load_model():
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Port a .NET project to Python using a local LLM.')
-    parser.add_argument('project_path', help='Path to the .NET project git repository.')
-    parser.add_argument('--output_dir', default='python_project', help='Directory to output the Python project.')
+    parser = argparse.ArgumentParser(
+        description='Port a .NET project to Python using a local LLM.'
+    )
+    parser.add_argument(
+        'project_path', help='Path to the .NET project git repository.'
+    )
+    parser.add_argument(
+        '--output_dir',
+        default='python_project',
+        help='Directory to output the Python project.',
+    )
     args = parser.parse_args()
 
     global model, tokenizer, device
@@ -370,7 +432,9 @@ def main():
     # Strategy 1
     strategy1_output_dir = os.path.join(output_dir, 'strategy1')
     os.makedirs(strategy1_output_dir, exist_ok=True)
-    strategy_file_by_file_translation(dotnet_files, project_path, strategy1_output_dir)
+    strategy_file_by_file_translation(
+        dotnet_files, project_path, strategy1_output_dir
+    )
     strategy_scores['strategy1'] = evaluate_project(strategy1_output_dir)
 
     # Strategy 1.1
@@ -382,8 +446,25 @@ def main():
     # Strategy 2
     strategy2_output_dir = os.path.join(output_dir, 'strategy2')
     os.makedirs(strategy2_output_dir, exist_ok=True)
-    strategy_reimplement_from_design(dotnet_files, project_path, strategy2_output_dir)
+    # Get the simplified Python files from strategy 1.1
+    python_files = []
+    for root, _, files in os.walk(strategy1_1_output_dir):
+        for file in files:
+            if file.endswith('.py'):
+                file_path = os.path.join(root, file)
+                python_files.append(file_path)
+    strategy_reimplement_from_python_summaries(
+        python_files, strategy1_1_output_dir, strategy2_output_dir
+    )
     strategy_scores['strategy2'] = evaluate_project(strategy2_output_dir)
+
+    # Strategy 3
+    strategy3_output_dir = os.path.join(output_dir, 'strategy3')
+    os.makedirs(strategy3_output_dir, exist_ok=True)
+    strategy_reimplement_from_design(
+        dotnet_files, project_path, strategy3_output_dir
+    )
+    strategy_scores['strategy3'] = evaluate_project(strategy3_output_dir)
 
     # Select the best strategy
     best_strategy = max(strategy_scores, key=strategy_scores.get)
