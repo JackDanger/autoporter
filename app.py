@@ -116,6 +116,48 @@ def strategy_reimplement_from_design(dotnet_files, project_dir, output_dir):
     print_step("Strategy 3 completed.")
 
 
+def strategy_full_project_reimplementation(dotnet_files, project_dir, output_dir):
+    print_step("Starting Strategy 4: Full project reimplementation using the entire codebase.")
+    # Step 1: Read all source code files and create a concatenated string
+    code_snippets = []
+    for file_path in dotnet_files:
+        relative_path = os.path.relpath(file_path, project_dir)
+        with open(file_path, 'r', encoding='utf-8') as f:
+            code = f.read()
+        snippet = f"// Filename: {relative_path}\n{code}\n"
+        code_snippets.append(snippet)
+    full_code = "\n".join(code_snippets)
+    # Step 2: Create the prompt
+    prompt = (
+        "As an expert Python developer, please reimplement the following .NET project in Python. "
+        "Preserve the project structure and functionality, and organize the code into appropriate Python modules and packages. "
+        "Use SQLAlchemy for database interactions, FastAPI for HTTP endpoints, and pytest for unit testing where appropriate. "
+        "Provide the code files in the following format:\n\n"
+        "'Filename: relative/path/to/filename.py'\n<code>\n\n"
+        "Provide only the code files as specified, without any additional text.\n\n"
+        "Here is the entire .NET project code:\n\n"
+        f"{full_code}\n"
+    )
+    # Step 3: Send the prompt to the LLM
+    response_content = call_gemini(prompt)
+    # Step 4: Parse the response into files
+    code_files = parse_code_files_from_response_multiple_files(response_content)
+    # Perform cleanup and sanity checks
+    code_files = perform_cleanup_and_sanity_checks(code_files)
+    # Save the files
+    for file_name, code in code_files.items():
+        sanitized_file_name = sanitize_filename(file_name)
+        output_path = os.path.join(output_dir, sanitized_file_name)
+        if os.path.exists(output_path):
+            print_step(f"Skipping existing file: {output_path}")
+            continue
+        print_step(f"Writing file: {output_path}")
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(code)
+    print_step("Strategy 4 completed.")
+
+
 def translate_code(code):
     print_step("Using LLM to translate code.")
     prompt = (
@@ -251,12 +293,13 @@ def implement_python_project(design, output_dir):
         "Use SQLAlchemy for database interactions, FastAPI for HTTP endpoints, and pytest for tests. "
         "Ensure the code follows Python conventions, is well-documented with comments, and passes linting. "
         "Provide the code files in the following format:\n\n"
-        "'Filename: filename.py'\n<code>\n\n"
+        "'Filename: relative/path/to/filename.py'\n<code>\n\n"
         "Provide only the code files as specified, without any additional text.\n\n"
         f"{design}\n"
     )
     response_content = call_gemini(prompt)
     code_files = parse_code_files_from_response_multiple_files(response_content)
+    code_files = perform_cleanup_and_sanity_checks(code_files)
     for file_name, code in code_files.items():
         sanitized_file_name = sanitize_filename(file_name)
         output_path = os.path.join(output_dir, sanitized_file_name)
@@ -269,16 +312,48 @@ def implement_python_project(design, output_dir):
             f.write(code)
 
 
-def parse_code_files_from_response_multiple_files(response_content):
+def parse_code_files_from_response_multiple_files(response_content, recursion_depth=0, max_recursion_depth=3):
     print_step("Parsing code files from LLM response.")
     code_files = {}
-    pattern = r"'Filename:\s*(.*?)'\n(.*?)\n(?=(?:'Filename:|$))"
+    pattern = r"'Filename:\s*(.*?)'\n(.*?)(?=(?:'Filename:|$))"
     matches = re.finditer(pattern, response_content, re.DOTALL)
+    last_match_end = 0
     for match in matches:
         filename = match.group(1).strip()
         code = match.group(2).strip()
         code_files[filename] = code
+        last_match_end = match.end()
+    unparsed_parts = response_content[last_match_end:].strip()
+    if unparsed_parts and recursion_depth < max_recursion_depth:
+        print_step("Found unparsed parts in the response.")
+        additional_code_files = clarify_unparsed_parts(unparsed_parts, recursion_depth + 1, max_recursion_depth)
+        code_files.update(additional_code_files)
     return code_files
+
+
+def clarify_unparsed_parts(unparsed_parts, recursion_depth, max_recursion_depth):
+    print_step("Using LLM to clarify unparsed parts.")
+    prompt = (
+        "The following text was generated as part of a code generation task but was not properly formatted. "
+        "Please extract any code files from it, and provide them in the following format:\n\n"
+        "'Filename: relative/path/to/filename.py'\n<code>\n\n"
+        "Provide only the code files as specified, without any additional text.\n\n"
+        f"{unparsed_parts}\n"
+    )
+    response = call_gemini(prompt)
+    additional_code_files = parse_code_files_from_response_multiple_files(response, recursion_depth, max_recursion_depth)
+    return additional_code_files
+
+
+def perform_cleanup_and_sanity_checks(code_files):
+    print_step("Performing cleanup and sanity checks on the code files.")
+    cleaned_code_files = {}
+    for filename, code in code_files.items():
+        if not code.strip():
+            print_step(f"Code for file {filename} is empty. Skipping.")
+            continue
+        cleaned_code_files[filename] = code
+    return cleaned_code_files
 
 
 def generate_unit_tests(output_dir):
@@ -351,6 +426,7 @@ def call_gemini(prompt):
                     # Only one candidate for now.
                     candidate_count=1,
                     temperature=0.8,
+                    max_output_tokens=8192,
                 ),
                 stream=True,
             )
@@ -427,6 +503,14 @@ def main():
         dotnet_files, project_path, strategy3_output_dir
     )
     strategy_scores['strategy3'] = evaluate_project(strategy3_output_dir)
+
+    # Strategy 4
+    strategy4_output_dir = os.path.join(output_dir, 'strategy4')
+    os.makedirs(strategy4_output_dir, exist_ok=True)
+    strategy_full_project_reimplementation(
+        dotnet_files, project_path, strategy4_output_dir
+    )
+    strategy_scores['strategy4'] = evaluate_project(strategy4_output_dir)
 
     # Select the best strategy
     best_strategy = max(strategy_scores, key=strategy_scores.get)
