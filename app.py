@@ -1,16 +1,13 @@
 import argparse
 import os
 import re
-import threading
 import time
-
-import torch
 from tqdm import tqdm
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    TextIteratorStreamer,
-)
+import google.generativeai as genai
+
+
+genai.configure(api_key=os.environ['API_KEY'])
+model = genai.GenerativeModel(model_name='gemini-1.5-flash-8b')
 
 
 def print_step(step):
@@ -127,7 +124,7 @@ def translate_code(code):
         "Provide only the converted Python code, without any explanations or additional text.\n\n"
         f"{code}\n"
     )
-    response = call_local_llm(prompt)
+    response = call_gemini(prompt)
     translated_code = response.strip()
     return translated_code
 
@@ -141,7 +138,7 @@ def simplify_python_code(code):
         "Include explanations as comments within the code. Provide only the refactored code, without any explanations or additional text.\n\n"
         f"{code}\n"
     )
-    response = call_local_llm(prompt)
+    response = call_gemini(prompt)
     simplified_code = response.strip()
     return simplified_code
 
@@ -169,7 +166,7 @@ def extract_project_description(dotnet_files, project_dir, output_dir):
                 "Exclude boilerplate and unimportant details. Provide only the summary, without any additional text.\n\n"
                 f"{code}\n"
             )
-            summary = call_local_llm(prompt)
+            summary = call_gemini(prompt)
             summary_text = summary.strip()
             with open(output_path, 'w', encoding='utf-8') as f:
                 f.write(summary_text)
@@ -183,7 +180,7 @@ def extract_project_description(dotnet_files, project_dir, output_dir):
         "Provide only the project description, without any additional text.\n\n"
         f"{combined_description}\n"
     )
-    project_description = call_local_llm(prompt)
+    project_description = call_gemini(prompt)
     project_description_text = project_description.strip()
     return project_description_text
 
@@ -213,7 +210,7 @@ def extract_project_description_from_python(
                 "important parts. Ignore setup and config that could be guessed if it were missing. Provide only your notes for the file, without any additional text.\n\n"
                 f"# Filename: {relative_path}\n{code}\n"
             )
-            summary = call_local_llm(prompt)
+            summary = call_gemini(prompt)
             summary_text = summary.strip()
             with open(output_path, 'w', encoding='utf-8') as f:
                 f.write(summary_text)
@@ -227,7 +224,7 @@ def extract_project_description_from_python(
         "Provide only the project description, without any additional text.\n\n"
         f"{combined_description}\n"
     )
-    project_description = call_local_llm(prompt)
+    project_description = call_gemini(prompt)
     project_description_text = project_description.strip()
     return project_description_text
 
@@ -242,7 +239,7 @@ def generate_high_level_design(project_description):
         "Provide only the high-level design, without any additional text.\n\n"
         f"{project_description}\n"
     )
-    response = call_local_llm(prompt)
+    response = call_gemini(prompt)
     design = response.strip()
     return design
 
@@ -258,7 +255,7 @@ def implement_python_project(design, output_dir):
         "Provide only the code files as specified, without any additional text.\n\n"
         f"{design}\n"
     )
-    response_content = call_local_llm(prompt)
+    response_content = call_gemini(prompt)
     code_files = parse_code_files_from_response_multiple_files(response_content)
     for file_name, code in code_files.items():
         sanitized_file_name = sanitize_filename(file_name)
@@ -318,7 +315,7 @@ def generate_unit_test(code):
         "Include explanations as comments within the test code. Provide only the test code, without any additional text.\n\n"
         f"{code}\n"
     )
-    unit_test_code = call_local_llm(prompt)
+    unit_test_code = call_gemini(prompt)
     unit_test_code = unit_test_code.strip()
     return unit_test_code
 
@@ -342,69 +339,39 @@ def evaluate_project(project_dir):
     return num_files
 
 
-def call_local_llm(prompt):
-    max_retries = 3
+def call_gemini(prompt):
+    max_retries = 15
     retry_delay = 1  # Start with 1-second delay
-    max_new_tokens = 1024  # Increased to accommodate longer code
+
     for attempt in range(max_retries):
         try:
-            print_step("Tokenizing input...")
-            inputs = tokenizer(prompt, return_tensors='pt', truncation=True)
-            input_ids = inputs.input_ids.to(device)
-            attention_mask = inputs.attention_mask.to(device)
-            total_input_tokens = input_ids.shape[-1]
-            print_step(f"Input has {total_input_tokens} tokens.")
-
-            streamer = TextIteratorStreamer(
-                tokenizer, skip_prompt=True, skip_special_tokens=True
+            response = model.generate_content(
+                prompt,
+                generation_config=genai.types.GenerationConfig(
+                    # Only one candidate for now.
+                    candidate_count=1,
+                    temperature=0.8,
+                ),
+                stream=True,
             )
-
-            generation_kwargs = dict(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                max_new_tokens=max_new_tokens,
-                do_sample=False,  # Deterministic output
-                temperature=0.0,  # Less randomness
-                streamer=streamer,
-            )
-
-            print_step("Generating response...")
-            generation_thread = threading.Thread(
-                target=model.generate, kwargs=generation_kwargs
-            )
-            generation_thread.start()
-
-            response = ''
-            for new_text in streamer:
-                print(new_text, end='', flush=True)
-                response += new_text
-            return response.strip()
+            chunks = ""
+            for chunk in response:
+                print(chunk.text, end='', flush=True)
+                chunks += chunk.text
+            return chunks
         except Exception as e:
             print_step(
                 f"Error generating response: {e}. Retrying in {retry_delay} seconds..."
             )
             time.sleep(retry_delay)
             retry_delay *= 2  # Exponential backoff
-    print_step("Failed to get a valid response from the local LLM.")
+    print_step("Failed to get a valid response from the Google PaLM API.")
     return ''
-
-
-def load_model():
-    model_name = os.environ.get('MODEL', 'EleutherAI/gpt-neo-2.7B')
-    print_step(
-        f"Loading the local LLM model '{model_name}'. This may take some time..."
-    )
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    tokenizer.pad_token_id = tokenizer.eos_token_id
-    model = AutoModelForCausalLM.from_pretrained(model_name)
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model.to(device)
-    return model, tokenizer, device
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Port a .NET project to Python using a local LLM.'
+        description='Port a .NET project to Python using the Google PaLM API.'
     )
     parser.add_argument(
         'project_path', help='Path to the .NET project git repository.'
@@ -415,9 +382,6 @@ def main():
         help='Directory to output the Python project.',
     )
     args = parser.parse_args()
-
-    global model, tokenizer, device
-    model, tokenizer, device = load_model()
 
     project_path = os.path.abspath(args.project_path)
     output_dir = os.path.abspath(args.output_dir)
