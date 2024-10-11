@@ -26,36 +26,237 @@ def analyze_dotnet_project(project_path):
     return dotnet_files
 
 
-def strategy1_full_project_reimplementation(dotnet_files, project_dir, output_dir):
-    print_step("Starting Strategy 1: Full project reimplementation using the entire codebase.")
-    code_snippets = []
-    for file_path in tqdm(dotnet_files, desc="Reading .NET files", unit="file"):
-        relative_path = os.path.relpath(file_path, project_dir)
+def strategy_file_by_file_translation(dotnet_files, project_path, output_dir):
+    print_step("Starting Strategy 1: File-by-file translation.")
+    for file_path in tqdm(dotnet_files, desc="Translating files", unit="file"):
+        relative_path = os.path.relpath(file_path, project_path)
+        relative_path = os.path.normpath(relative_path)
+        output_path = os.path.join(output_dir, relative_path)
+        output_path = os.path.splitext(output_path)[0] + '.py'
+        if os.path.exists(output_path):
+            tqdm.write(f"Skipping existing file: {output_path}")
+            continue
+        tqdm.write(f"Translating {file_path} -> {output_path}")
         with open(file_path, 'r', encoding='utf-8') as f:
             code = f.read()
-        snippet = f"// Filename: {relative_path}\n{code}\n"
-        code_snippets.append(snippet)
-    full_code = "\n".join(code_snippets)
+        translated_code = translate_code(code)
+        if not translated_code:
+            tqdm.write(f"Translation failed for {file_path}. Skipping.")
+            continue
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(translated_code)
+    print_step("Strategy 1 completed.")
 
-    prompt = (
-        "As an expert Python developer, please reimplement the following .NET project in Python. "
-        "Preserve the project structure and functionality, and organize the code into appropriate Python modules and packages. "
-        "Use SQLAlchemy for database interactions, FastAPI for HTTP endpoints, and pytest for unit testing where appropriate. "
-        "Be comprehensive in keeping all the logic and refactor the implementation toward something simple and good. "
-        "Make this like a million-dollar engineering migration, producing tests and thoroughly perfect code. "
-        "Provide the code files in the following format:\n\n"
-        "'Filename: relative/path/to/filename.py'\n<code>\n\n"
-        "Provide only the code files as specified, without any additional text.\n\n"
-        "Here is the entire .NET project code:\n\n"
-        f"{full_code}\n"
+
+def strategy_simplify_python_app(strategy1_output_dir, output_dir):
+    print_step("Starting Strategy 1.1: Simplifying the Python application.")
+    python_files = []
+    for root, _, files in os.walk(strategy1_output_dir):
+        for file in files:
+            if file.endswith('.py'):
+                file_path = os.path.join(root, file)
+                python_files.append(file_path)
+    for file_path in tqdm(python_files, desc="Simplifying files", unit="file"):
+        relative_path = os.path.relpath(file_path, strategy1_output_dir)
+        output_path = os.path.join(output_dir, relative_path)
+        if os.path.exists(output_path):
+            tqdm.write(f"Skipping existing file: {output_path}")
+            continue
+        tqdm.write(f"Simplifying {file_path} -> {output_path}")
+        with open(file_path, 'r', encoding='utf-8') as f:
+            code = f.read()
+        simplified_code = simplify_python_code(code)
+        if not simplified_code:
+            tqdm.write(f"Simplification failed for {file_path}. Skipping.")
+            continue
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(simplified_code)
+    print_step("Strategy 1.1 completed.")
+
+
+def strategy_reimplement_from_python_summaries(
+    python_files, project_dir, output_dir
+):
+    print_step(
+        "Starting Strategy 2: Reimplementing from simplified Python code summaries."
     )
+    project_description = extract_project_description_from_python(
+        python_files, project_dir, output_dir
+    )
+    if not project_description:
+        print_step(
+            "Failed to extract project description from Python code. Skipping Strategy 2."
+        )
+        return
+    design = generate_high_level_design(project_description)
+    if not design:
+        print_step("Failed to generate high-level design. Skipping Strategy 2.")
+        return
+    implement_python_project(design, output_dir)
+    print_step("Strategy 2 completed.")
 
+
+def strategy_reimplement_from_design(dotnet_files, project_dir, output_dir):
+    print_step(
+        "Starting Strategy 3: Reimplementing from high-level design based on C# summaries."
+    )
+    project_description = extract_project_description(
+        dotnet_files, project_dir, output_dir
+    )
+    if not project_description:
+        print_step("Failed to extract project description. Skipping Strategy 3.")
+        return
+    design = generate_high_level_design(project_description)
+    if not design:
+        print_step("Failed to generate high-level design. Skipping Strategy 3.")
+        return
+    implement_python_project(design, output_dir)
+    print_step("Strategy 3 completed.")
+
+
+def translate_code(code):
+    print_step("Using LLM to translate code.")
+    prompt = (
+        "As an expert software engineer proficient in C# and Python, please convert the following C# code to Python. "
+        "Ensure functionality is preserved, simplify unnecessary complexity, and follow Python best practices. "
+        "Provide only the converted Python code, without any explanations or additional text.\n\n"
+        f"{code}\n"
+    )
+    response = call_gemini(prompt)
+    translated_code = response.strip()
+    return translated_code
+
+
+def simplify_python_code(code):
+    print_step("Using LLM to simplify Python code.")
+    prompt = (
+        "As an experienced Python developer, refactor the following code to enhance simplicity and efficiency. "
+        "Use SQLAlchemy for database interactions, FastAPI for HTTP endpoints, and pytest for unit testing where appropriate. "
+        "Ensure the refactored code preserves functionality, follows best practices, and is lint-compliant. "
+        "Include explanations as comments within the code. Provide only the refactored code, without any explanations or additional text.\n\n"
+        f"{code}\n"
+    )
+    response = call_gemini(prompt)
+    simplified_code = response.strip()
+    return simplified_code
+
+
+def extract_project_description(dotnet_files, project_dir, output_dir):
+    print_step("Extracting project description from C# source files.")
+    partial_descriptions = []
+    for file_path in tqdm(dotnet_files, desc="Summarizing C# files", unit="file"):
+        relative_path = os.path.relpath(file_path, project_dir)
+        output_path = os.path.join(
+            output_dir, 'descriptions', f"{relative_path}.description"
+        )
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        if os.path.exists(output_path):
+            with open(output_path, 'r', encoding='utf-8') as f:
+                summary_text = f.read()
+            tqdm.write(f"Using existing summary for {file_path}")
+        else:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                code = f.read()
+            prompt = (
+                "As a software analyst, produce a concise yet exhaustive summary of the following C# file. "
+                "List key elements using the format '[Type] Name: Purpose', where Type is Class, Method, or Property. "
+                "Include only essential information and use abbreviations to minimize tokens. "
+                "Exclude boilerplate and unimportant details. Provide only the summary, without any additional text.\n\n"
+                f"{code}\n"
+            )
+            summary = call_gemini(prompt)
+            summary_text = summary.strip()
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(summary_text)
+            tqdm.write(f"Summarized {file_path}")
+        partial_descriptions.append(summary_text)
+    combined_description = "\n".join(partial_descriptions)
+    prompt = (
+        "As a software analyst, based on the following file summaries, produce a concise and exhaustive high-level description "
+        "of the project's overall functionality. Focus on main features, architecture, and key components and their interactions. "
+        "Present the description in a structured format using bullet points or key-value pairs to minimize tokens. "
+        "Provide only the project description, without any additional text.\n\n"
+        f"{combined_description}\n"
+    )
+    project_description = call_gemini(prompt)
+    project_description_text = project_description.strip()
+    return project_description_text
+
+
+def extract_project_description_from_python(
+    python_files, project_dir, output_dir
+):
+    print_step("Extracting project description from simplified Python source files.")
+    partial_descriptions = []
+    for file_path in tqdm(python_files, desc="Summarizing Python files", unit="file"):
+        relative_path = os.path.relpath(file_path, project_dir)
+        output_path = os.path.join(
+            output_dir, 'descriptions', f"{relative_path}.description"
+        )
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        if os.path.exists(output_path):
+            with open(output_path, 'r', encoding='utf-8') as f:
+                summary_text = f.read()
+            tqdm.write(f"Using existing summary for {file_path}")
+        else:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                code = f.read()
+            prompt = (
+                "As a software engineer, summarize the following Python file in extremely terse language as if you're "
+                "writing notes to yourself. Jot down the bare minimum, in compact language, that you'll need in order "
+                "to create something similar later. Avoid mentioning any boilerplate; identify only the most "
+                "important parts. Ignore setup and config that could be guessed if it were missing. Provide only your notes for the file, without any additional text.\n\n"
+                f"# Filename: {relative_path}\n{code}\n"
+            )
+            summary = call_gemini(prompt)
+            summary_text = summary.strip()
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(summary_text)
+            tqdm.write(f"Summarized {file_path}")
+        partial_descriptions.append(summary_text)
+    combined_description = "\n".join(partial_descriptions)
+    prompt = (
+        "As a software analyst, based on the following file summaries, produce a concise and exhaustive high-level description "
+        "of the project's overall functionality. Focus on main features, architecture, and key components and their interactions. "
+        "Present the description in a structured format using bullet points or key-value pairs to minimize tokens. "
+        "Provide only the project description, without any additional text.\n\n"
+        f"{combined_description}\n"
+    )
+    project_description = call_gemini(prompt)
+    project_description_text = project_description.strip()
+    return project_description_text
+
+
+def generate_high_level_design(project_description):
+    print_step("Generating high-level design.")
+    prompt = (
+        "As a software architect, create a detailed high-level design for a Python implementation of the project described below. "
+        "The design should focus on simplicity, efficiency, and adherence to Python best practices. "
+        "Include suggestions for using SQLAlchemy for database interactions, FastAPI for HTTP endpoints, and pytest for testing. "
+        "Present the design in a structured format, outlining modules, classes, key functions, and their relationships. "
+        "Provide only the high-level design, without any additional text.\n\n"
+        f"{project_description}\n"
+    )
+    response = call_gemini(prompt)
+    design = response.strip()
+    return design
+
+
+def implement_python_project(design, output_dir):
+    print_step("Implementing Python project based on the design.")
+    prompt = (
+        "As an expert Python developer, implement the Python project based on the high-level design provided below. "
+        "Use SQLAlchemy for database interactions, FastAPI for HTTP endpoints, and pytest for tests. "
+        "Ensure the code follows Python conventions, is well-documented with comments, and passes linting. "
+        "Provide the code files in the following format:\n\n"
+        "'Filename: filename.py'\n<code>\n\n"
+        "Provide only the code files as specified, without any additional text.\n\n"
+        f"{design}\n"
+    )
     response_content = call_gemini(prompt)
-
     code_files = parse_code_files_from_response_multiple_files(response_content)
-
-    code_files = perform_cleanup_and_sanity_checks(code_files)
-
     for file_name, code in code_files.items():
         sanitized_file_name = sanitize_filename(file_name)
         output_path = os.path.join(output_dir, sanitized_file_name)
@@ -66,97 +267,57 @@ def strategy1_full_project_reimplementation(dotnet_files, project_dir, output_di
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(code)
-    print_step("Strategy 1 completed.")
 
 
-def strategy2_improve_project(strategy1_output_dir, output_dir):
-    print_step("Starting Strategy 2: Enhancing the project with monitoring, security, and dependencies.")
-    python_files = []
-    for root, _, files in os.walk(strategy1_output_dir):
-        for file in files:
-            if file.endswith('.py'):
-                file_path = os.path.join(root, file)
-                python_files.append(file_path)
-
-    code_snippets = []
-    for file_path in tqdm(python_files, desc="Reading Python files", unit="file"):
-        relative_path = os.path.relpath(file_path, strategy1_output_dir)
-        with open(file_path, 'r', encoding='utf-8') as f:
-            code = f.read()
-        snippet = f"# Filename: {relative_path}\n{code}\n"
-        code_snippets.append(snippet)
-    full_code = "\n".join(code_snippets)
-
-    prompt = (
-        "As an expert Python developer with a focus on monitoring, security, and best practices, please review and enhance the following Python project code. "
-        "Ensure the application is secure, efficient, and includes necessary dependencies using Poetry for dependency management. "
-        "Add logging, monitoring capabilities, and address any security concerns. "
-        "Consider code optimization, error handling, and adherence to PEP8 standards. "
-        "Provide the updated code files in the following format:\n\n"
-        "'Filename: relative/path/to/filename.py'\n<updated code>\n\n"
-        "Provide only the code files as specified, without any additional text.\n\n"
-        "Here is the existing Python project code:\n\n"
-        f"{full_code}\n"
-    )
-
-    response_content = call_gemini(prompt)
-
-    code_files = parse_code_files_from_response_multiple_files(response_content)
-
-    code_files = perform_cleanup_and_sanity_checks(code_files)
-
-    for file_name, code in code_files.items():
-        sanitized_file_name = sanitize_filename(file_name)
-        output_path = os.path.join(output_dir, sanitized_file_name)
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        with open(output_path, 'w', encoding='utf-8') as f:
-            f.write(code)
-        print_step(f"Updated file: {output_path}")
-    print_step("Strategy 2 completed.")
-
-
-def parse_code_files_from_response_multiple_files(response_content, recursion_depth=0, max_recursion_depth=3):
+def parse_code_files_from_response_multiple_files(response_content):
     print_step("Parsing code files from LLM response.")
     code_files = {}
-    pattern = r"'Filename:\s*(.*?)'\n(.*?)(?=(?:'Filename:|$))"
+    pattern = r"'Filename:\s*(.*?)'\n(.*?)\n(?=(?:'Filename:|$))"
     matches = re.finditer(pattern, response_content, re.DOTALL)
-    last_match_end = 0
     for match in matches:
         filename = match.group(1).strip()
         code = match.group(2).strip()
         code_files[filename] = code
-        last_match_end = match.end()
-    unparsed_parts = response_content[last_match_end:].strip()
-    if unparsed_parts and recursion_depth < max_recursion_depth:
-        print_step("Found unparsed parts in the response.")
-        additional_code_files = clarify_unparsed_parts(unparsed_parts, recursion_depth + 1, max_recursion_depth)
-        code_files.update(additional_code_files)
     return code_files
 
 
-def clarify_unparsed_parts(unparsed_parts, recursion_depth, max_recursion_depth):
-    print_step("Using LLM to clarify unparsed parts.")
-    prompt = (
-        "The following text was generated as part of a code generation task but was not properly formatted. "
-        "Please extract any code files from it, and provide them in the following format:\n\n"
-        "'Filename: relative/path/to/filename.py'\n<code>\n\n"
-        "Provide only the code files as specified, without any additional text.\n\n"
-        f"{unparsed_parts}\n"
-    )
-    response = call_gemini(prompt)
-    additional_code_files = parse_code_files_from_response_multiple_files(response, recursion_depth, max_recursion_depth)
-    return additional_code_files
-
-
-def perform_cleanup_and_sanity_checks(code_files):
-    print_step("Performing cleanup and sanity checks on the code files.")
-    cleaned_code_files = {}
-    for filename, code in code_files.items():
-        if not code.strip():
-            print_step(f"Code for file {filename} is empty. Skipping.")
+def generate_unit_tests(output_dir):
+    print_step("Generating unit tests for the Python project.")
+    python_files = []
+    for root, _, files in os.walk(output_dir):
+        for file in files:
+            if file.endswith('.py') and not file.startswith('test_'):
+                file_path = os.path.join(root, file)
+                python_files.append(file_path)
+    for file_path in tqdm(python_files, desc="Generating unit tests", unit="file"):
+        test_file_name = f'test_{os.path.basename(file_path)}'
+        test_file_path = os.path.join(os.path.dirname(file_path), test_file_name)
+        if os.path.exists(test_file_path):
+            tqdm.write(f"Skipping existing test file: {test_file_path}")
             continue
-        cleaned_code_files[filename] = code
-    return cleaned_code_files
+        tqdm.write(f"Generating unit tests for {file_path}")
+        with open(file_path, 'r', encoding='utf-8') as f:
+            code = f.read()
+        unit_test_code = generate_unit_test(code)
+        if not unit_test_code:
+            tqdm.write(f"Unit test generation failed for {file_path}. Skipping.")
+            continue
+        os.makedirs(os.path.dirname(test_file_path), exist_ok=True)
+        with open(test_file_path, 'w', encoding='utf-8') as f:
+            f.write(unit_test_code)
+    print_step("Unit test generation completed.")
+
+
+def generate_unit_test(code):
+    prompt = (
+        "As an expert Python developer specializing in writing unit tests using pytest, write comprehensive unit tests for the following code. "
+        "Ensure the tests cover significant functionality and edge cases. "
+        "Include explanations as comments within the test code. Provide only the test code, without any additional text.\n\n"
+        f"{code}\n"
+    )
+    unit_test_code = call_gemini(prompt)
+    unit_test_code = unit_test_code.strip()
+    return unit_test_code
 
 
 def sanitize_filename(filename):
@@ -167,21 +328,37 @@ def sanitize_filename(filename):
     return filename
 
 
+def evaluate_project(project_dir):
+    print_step(f"Evaluating the project in {project_dir}.")
+    num_files = 0
+    for root, _, files in os.walk(project_dir):
+        for file in files:
+            if file.endswith('.py'):
+                num_files += 1
+    print_step(f"Found {num_files} Python files in {project_dir}.")
+    return num_files
+
+
 def call_gemini(prompt):
     max_retries = 15
     retry_delay = 1  # Start with 1-second delay
 
     for attempt in range(max_retries):
         try:
-            return model.generate_content(
+            response = model.generate_content(
                 prompt,
                 generation_config=genai.types.GenerationConfig(
                     # Only one candidate for now.
                     candidate_count=1,
                     temperature=0.8,
-                    max_output_tokens=8192,
-                )
-            ).text
+                ),
+                stream=True,
+            )
+            chunks = ""
+            for chunk in response:
+                print(chunk.text, end='', flush=True)
+                chunks += chunk.text
+            return chunks
         except Exception as e:
             print_step(
                 f"Error generating response: {e}. Retrying in {retry_delay} seconds..."
@@ -212,17 +389,52 @@ def main():
     print_step("Starting the porting process.")
     dotnet_files = analyze_dotnet_project(project_path)
 
+    strategy_scores = {}
+
     # Strategy 1
     strategy1_output_dir = os.path.join(output_dir, 'strategy1')
     os.makedirs(strategy1_output_dir, exist_ok=True)
-    strategy1_full_project_reimplementation(
+    strategy_file_by_file_translation(
         dotnet_files, project_path, strategy1_output_dir
     )
+    strategy_scores['strategy1'] = evaluate_project(strategy1_output_dir)
+
+    # Strategy 1.1
+    strategy1_1_output_dir = os.path.join(output_dir, 'strategy1_1')
+    os.makedirs(strategy1_1_output_dir, exist_ok=True)
+    strategy_simplify_python_app(strategy1_output_dir, strategy1_1_output_dir)
+    strategy_scores['strategy1_1'] = evaluate_project(strategy1_1_output_dir)
 
     # Strategy 2
     strategy2_output_dir = os.path.join(output_dir, 'strategy2')
     os.makedirs(strategy2_output_dir, exist_ok=True)
-    strategy2_improve_project(strategy1_output_dir, strategy2_output_dir)
+    # Get the simplified Python files from strategy 1.1
+    python_files = []
+    for root, _, files in os.walk(strategy1_1_output_dir):
+        for file in files:
+            if file.endswith('.py'):
+                file_path = os.path.join(root, file)
+                python_files.append(file_path)
+    strategy_reimplement_from_python_summaries(
+        python_files, strategy1_1_output_dir, strategy2_output_dir
+    )
+    strategy_scores['strategy2'] = evaluate_project(strategy2_output_dir)
+
+    # Strategy 3
+    strategy3_output_dir = os.path.join(output_dir, 'strategy3')
+    os.makedirs(strategy3_output_dir, exist_ok=True)
+    strategy_reimplement_from_design(
+        dotnet_files, project_path, strategy3_output_dir
+    )
+    strategy_scores['strategy3'] = evaluate_project(strategy3_output_dir)
+
+    # Select the best strategy
+    best_strategy = max(strategy_scores, key=strategy_scores.get)
+    print_step(f"Selected {best_strategy} as the best strategy.")
+
+    # Generate unit tests for the best strategy
+    best_output_dir = os.path.join(output_dir, best_strategy)
+    generate_unit_tests(best_output_dir)
 
     print_step("Porting process completed.")
 
