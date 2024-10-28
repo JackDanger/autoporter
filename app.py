@@ -7,7 +7,8 @@ import google.generativeai as genai
 
 
 genai.configure(api_key=os.environ['API_KEY'])
-model = genai.GenerativeModel(model_name='gemini-1.5-flash-8b')
+MODEL_NAME = os.environ.get('MODEL', 'gemini-1.5-flash-8b')
+model = genai.GenerativeModel(model_name=MODEL_NAME)
 
 
 def print_step(step):
@@ -384,7 +385,7 @@ def main():
     args = parser.parse_args()
 
     project_path = os.path.abspath(args.project_path)
-    output_dir = os.path.abspath(args.output_dir)
+    output_dir = f"{project_path}-{MODEL_NAME}"
 
     print_step("Starting the porting process.")
     dotnet_files = analyze_dotnet_project(project_path)
