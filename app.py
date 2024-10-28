@@ -5,7 +5,6 @@ import time
 from tqdm import tqdm
 import google.generativeai as genai
 
-
 genai.configure(api_key=os.environ['API_KEY'])
 MODEL_NAME = os.environ.get('MODEL', 'gemini-1.5-flash-8b')
 model = genai.GenerativeModel(model_name=MODEL_NAME)
@@ -77,19 +76,11 @@ def strategy_simplify_python_app(strategy1_output_dir, output_dir):
     print_step("Strategy 1.1 completed.")
 
 
-def strategy_reimplement_from_python_summaries(
-    python_files, project_dir, output_dir
-):
-    print_step(
-        "Starting Strategy 2: Reimplementing from simplified Python code summaries."
-    )
-    project_description = extract_project_description_from_python(
-        python_files, project_dir, output_dir
-    )
+def strategy_reimplement_from_python_summaries(python_files, project_dir, output_dir):
+    print_step("Starting Strategy 2: Reimplementing from simplified Python code summaries.")
+    project_description = extract_project_description_from_python(python_files, project_dir, output_dir)
     if not project_description:
-        print_step(
-            "Failed to extract project description from Python code. Skipping Strategy 2."
-        )
+        print_step("Failed to extract project description from Python code. Skipping Strategy 2.")
         return
     design = generate_high_level_design(project_description)
     if not design:
@@ -100,12 +91,8 @@ def strategy_reimplement_from_python_summaries(
 
 
 def strategy_reimplement_from_design(input_files, project_dir, output_dir):
-    print_step(
-        "Starting Strategy 3: Reimplementing from high-level design based on C# summaries."
-    )
-    project_description = extract_project_description(
-        input_files, project_dir, output_dir
-    )
+    print_step("Starting Strategy 3: Reimplementing from high-level design based on C# summaries.")
+    project_description = extract_project_description(input_files, project_dir, output_dir)
     if not project_description:
         print_step("Failed to extract project description. Skipping Strategy 3.")
         return
@@ -115,6 +102,20 @@ def strategy_reimplement_from_design(input_files, project_dir, output_dir):
         return
     implement_python_project(design, output_dir)
     print_step("Strategy 3 completed.")
+
+
+def strategy_modular_implementation(input_files, project_dir, output_dir):
+    print_step("Starting Strategy 4: Modular Implementation Based on High-Level Design.")
+    project_description = extract_project_description(input_files, project_dir, output_dir)
+    if not project_description:
+        print_step("Failed to extract project description. Skipping Strategy 4.")
+        return
+    design = generate_high_level_design(project_description)
+    if not design:
+        print_step("Failed to generate high-level design. Skipping Strategy 4.")
+        return
+    implement_python_project_modular(design, output_dir)
+    print_step("Strategy 4 completed.")
 
 
 def translate_code(code):
@@ -145,13 +146,11 @@ def simplify_python_code(code):
 
 
 def extract_project_description(input_files, project_dir, output_dir):
-    print_step("Extracting project description from C# source files.")
+    print_step("Extracting project description from source files.")
     partial_descriptions = []
-    for file_path in tqdm(input_files, desc="Summarizing C# files", unit="file"):
+    for file_path in tqdm(input_files, desc="Summarizing files", unit="file"):
         relative_path = os.path.relpath(file_path, project_dir)
-        output_path = os.path.join(
-            output_dir, 'descriptions', f"{relative_path}.description"
-        )
+        output_path = os.path.join(output_dir, 'descriptions', f"{relative_path}.description")
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         if os.path.exists(output_path):
             with open(output_path, 'r', encoding='utf-8') as f:
@@ -161,7 +160,7 @@ def extract_project_description(input_files, project_dir, output_dir):
             with open(file_path, 'r', encoding='utf-8') as f:
                 code = f.read()
             prompt = (
-                "As a software analyst, produce a concise yet exhaustive summary of the following C# file. "
+                "As a software analyst, produce a concise yet exhaustive summary of the following source file. "
                 "List key elements using the format '[Type] Name: Purpose', where Type is Class, Method, or Property. "
                 "Include only essential information and use abbreviations to minimize tokens. "
                 "Exclude boilerplate and unimportant details. Provide only the summary, without any additional text.\n\n"
@@ -186,16 +185,12 @@ def extract_project_description(input_files, project_dir, output_dir):
     return project_description_text
 
 
-def extract_project_description_from_python(
-    python_files, project_dir, output_dir
-):
+def extract_project_description_from_python(python_files, project_dir, output_dir):
     print_step("Extracting project description from simplified Python source files.")
     partial_descriptions = []
     for file_path in tqdm(python_files, desc="Summarizing Python files", unit="file"):
         relative_path = os.path.relpath(file_path, project_dir)
-        output_path = os.path.join(
-            output_dir, 'descriptions', f"{relative_path}.description"
-        )
+        output_path = os.path.join(output_dir, 'descriptions', f"{relative_path}.description")
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         if os.path.exists(output_path):
             with open(output_path, 'r', encoding='utf-8') as f:
@@ -237,7 +232,7 @@ def generate_high_level_design(project_description):
         "The design should focus on simplicity, efficiency, and adherence to Python best practices. "
         "Include suggestions for using SQLAlchemy for database interactions, FastAPI for HTTP endpoints, and pytest for testing. "
         "Present the design in a structured format, outlining modules, classes, key functions, and their relationships. "
-        "Provide only the high-level design, without any additional text.\n\n"
+        "Divide the design into modules using the format 'Module: ModuleName'. Provide only the high-level design, without any additional text.\n\n"
         f"{project_description}\n"
     )
     response = call_gemini(prompt)
@@ -258,6 +253,54 @@ def implement_python_project(design, output_dir):
         "```\n\n"
         "Provide only the code files as specified, without any additional text.\n\n"
         f"{design}\n"
+    )
+    response_content = call_gemini(prompt)
+    code_files = parse_code_files_from_response_multiple_files(response_content)
+    for file_name, code in code_files.items():
+        sanitized_file_name = sanitize_filename(file_name)
+        output_path = os.path.join(output_dir, sanitized_file_name)
+        if os.path.exists(output_path):
+            print_step(f"Skipping existing file: {output_path}")
+            continue
+        print_step(f"Writing file: {output_path}")
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(code)
+
+
+def implement_python_project_modular(design, output_dir):
+    print_step("Implementing Python project in a modular fashion based on the design.")
+    modules = parse_modules_from_design(design)
+    for module_name, module_design in modules.items():
+        implement_module(module_name, module_design, output_dir)
+
+
+def parse_modules_from_design(design):
+    print_step("Parsing modules from high-level design.")
+    modules = {}
+    module_sections = re.split(r"Module:\s*(.*?)\n", design)
+    # module_sections will have ['', module_name1, module_design1, module_name2, module_design2, ...]
+    # So we need to process it accordingly
+    for i in range(1, len(module_sections), 2):
+        module_name = module_sections[i].strip()
+        module_design = module_sections[i + 1].strip()
+        modules[module_name] = module_design
+    return modules
+
+
+def implement_module(module_name, module_design, output_dir):
+    print_step(f"Implementing module: {module_name}")
+    prompt = (
+        f"As an expert Python developer, implement the '{module_name}' module as described below. "
+        "Use SQLAlchemy for database interactions, FastAPI for HTTP endpoints, and pytest for tests where appropriate. "
+        "Ensure the code follows Python conventions, is well-documented with comments, and passes linting. "
+        "Provide the code in the following format:\n\n"
+        f"### {module_name}.py\n"
+        "```python\n"
+        "# code for {module_name}.py\n"
+        "```\n\n"
+        "Provide only the code as specified, without any additional text.\n\n"
+        f"{module_design}\n"
     )
     response_content = call_gemini(prompt)
     code_files = parse_code_files_from_response_multiple_files(response_content)
@@ -379,7 +422,7 @@ def call_gemini(prompt):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Port a project to Python using an LLM.'
+        description='Port a project to Python using the Google PaLM API.'
     )
     parser.add_argument(
         'project_path', help='Path to the project git repository.'
@@ -435,6 +478,14 @@ def main():
         input_files, project_path, strategy3_output_dir
     )
     strategy_scores['strategy3'] = evaluate_project(strategy3_output_dir)
+
+    # Strategy 4
+    strategy4_output_dir = os.path.join(output_dir, 'strategy4')
+    os.makedirs(strategy4_output_dir, exist_ok=True)
+    strategy_modular_implementation(
+        input_files, project_path, strategy4_output_dir
+    )
+    strategy_scores['strategy4'] = evaluate_project(strategy4_output_dir)
 
     # Select the best strategy
     best_strategy = max(strategy_scores, key=strategy_scores.get)
