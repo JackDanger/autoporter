@@ -15,21 +15,21 @@ def print_step(step):
     print(f"[Step] {step}")
 
 
-def analyze_dotnet_project(project_path):
-    print_step("Analyzing the .NET project structure.")
-    dotnet_files = []
+def analyze_project(project_path):
+    print_step("Analyzing the input project structure.")
+    input_files = []
     for root, _, files in os.walk(project_path):
         for file in files:
-            if file.endswith(('.cs', '.vb', '.fs')):
+            if file.endswith(('.cs', '.vb', '.fs', '.java')):
                 file_path = os.path.join(root, file)
-                dotnet_files.append(file_path)
-    print_step(f"Found {len(dotnet_files)} .NET source files.")
-    return dotnet_files
+                input_files.append(file_path)
+    print_step(f"Found {len(input_files)} source files.")
+    return input_files
 
 
-def strategy_file_by_file_translation(dotnet_files, project_path, output_dir):
+def strategy_file_by_file_translation(input_files, project_path, output_dir):
     print_step("Starting Strategy 1: File-by-file translation.")
-    for file_path in tqdm(dotnet_files, desc="Translating files", unit="file"):
+    for file_path in tqdm(input_files, desc="Translating files", unit="file"):
         relative_path = os.path.relpath(file_path, project_path)
         relative_path = os.path.normpath(relative_path)
         output_path = os.path.join(output_dir, relative_path)
@@ -99,12 +99,12 @@ def strategy_reimplement_from_python_summaries(
     print_step("Strategy 2 completed.")
 
 
-def strategy_reimplement_from_design(dotnet_files, project_dir, output_dir):
+def strategy_reimplement_from_design(input_files, project_dir, output_dir):
     print_step(
         "Starting Strategy 3: Reimplementing from high-level design based on C# summaries."
     )
     project_description = extract_project_description(
-        dotnet_files, project_dir, output_dir
+        input_files, project_dir, output_dir
     )
     if not project_description:
         print_step("Failed to extract project description. Skipping Strategy 3.")
@@ -120,7 +120,7 @@ def strategy_reimplement_from_design(dotnet_files, project_dir, output_dir):
 def translate_code(code):
     print_step("Using LLM to translate code.")
     prompt = (
-        "As an expert software engineer proficient in C# and Python, please convert the following C# code to Python. "
+        "As an expert software engineer proficient in both modern and historic programming languages, please convert the following legacy enterprise code to Python. "
         "Ensure functionality is preserved, simplify unnecessary complexity, and follow Python best practices. "
         "Provide only the converted Python code, without any explanations or additional text.\n\n"
         f"{code}\n"
@@ -144,10 +144,10 @@ def simplify_python_code(code):
     return simplified_code
 
 
-def extract_project_description(dotnet_files, project_dir, output_dir):
+def extract_project_description(input_files, project_dir, output_dir):
     print_step("Extracting project description from C# source files.")
     partial_descriptions = []
-    for file_path in tqdm(dotnet_files, desc="Summarizing C# files", unit="file"):
+    for file_path in tqdm(input_files, desc="Summarizing C# files", unit="file"):
         relative_path = os.path.relpath(file_path, project_dir)
         output_path = os.path.join(
             output_dir, 'descriptions', f"{relative_path}.description"
@@ -252,7 +252,10 @@ def implement_python_project(design, output_dir):
         "Use SQLAlchemy for database interactions, FastAPI for HTTP endpoints, and pytest for tests. "
         "Ensure the code follows Python conventions, is well-documented with comments, and passes linting. "
         "Provide the code files in the following format:\n\n"
-        "'Filename: filename.py'\n<code>\n\n"
+        "### filename.py\n"
+        "```python\n"
+        "# code for filename.py\n"
+        "```\n\n"
         "Provide only the code files as specified, without any additional text.\n\n"
         f"{design}\n"
     )
@@ -273,12 +276,16 @@ def implement_python_project(design, output_dir):
 def parse_code_files_from_response_multiple_files(response_content):
     print_step("Parsing code files from LLM response.")
     code_files = {}
-    pattern = r"'Filename:\s*(.*?)'\n(.*?)\n(?=(?:'Filename:|$))"
+    pattern = r"###\s*(.*?)\n```(?:python)?\n(.*?)\n```"
     matches = re.finditer(pattern, response_content, re.DOTALL)
     for match in matches:
         filename = match.group(1).strip()
         code = match.group(2).strip()
         code_files[filename] = code
+    if not code_files:
+        print_step("No code files were found in the LLM response.")
+        print("LLM Response Content:")
+        print(response_content)
     return code_files
 
 
@@ -372,10 +379,10 @@ def call_gemini(prompt):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Port a .NET project to Python using the Google PaLM API.'
+        description='Port a project to Python using an LLM.'
     )
     parser.add_argument(
-        'project_path', help='Path to the .NET project git repository.'
+        'project_path', help='Path to the project git repository.'
     )
     parser.add_argument(
         '--output_dir',
@@ -388,7 +395,7 @@ def main():
     output_dir = f"{project_path}-{MODEL_NAME}"
 
     print_step("Starting the porting process.")
-    dotnet_files = analyze_dotnet_project(project_path)
+    input_files = analyze_project(project_path)
 
     strategy_scores = {}
 
@@ -396,7 +403,7 @@ def main():
     strategy1_output_dir = os.path.join(output_dir, 'strategy1')
     os.makedirs(strategy1_output_dir, exist_ok=True)
     strategy_file_by_file_translation(
-        dotnet_files, project_path, strategy1_output_dir
+        input_files, project_path, strategy1_output_dir
     )
     strategy_scores['strategy1'] = evaluate_project(strategy1_output_dir)
 
@@ -425,7 +432,7 @@ def main():
     strategy3_output_dir = os.path.join(output_dir, 'strategy3')
     os.makedirs(strategy3_output_dir, exist_ok=True)
     strategy_reimplement_from_design(
-        dotnet_files, project_path, strategy3_output_dir
+        input_files, project_path, strategy3_output_dir
     )
     strategy_scores['strategy3'] = evaluate_project(strategy3_output_dir)
 
