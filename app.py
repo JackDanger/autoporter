@@ -1,5 +1,6 @@
 import argparse
 import os
+import uuid
 import re
 import time
 from tqdm import tqdm
@@ -192,6 +193,56 @@ def strategy_reimplement_from_full_spec(spec_file_path, output_dir):
     print_step("Strategy 6 completed.")
 
 
+def strategy_full_rewrite_from_entire_source(input_files, project_path, output_dir):
+    print_step("Starting Strategy 7: Full Rewrite from Entire Source Code in a Single Prompt.")
+    # Gather all original code into a single prompt
+    all_code_segments = []
+    for file_path in input_files:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            code = f.read()
+            all_code_segments.append(f"\n[FILE]: {file_path}\n{code}\n")
+    combined_code = "\n".join(all_code_segments)
+
+    # Craft the prompt for maximum quality, correctness, completeness, and factoring
+    prompt = (
+        "You are a world-class Python architect and developer. You have been given the entire legacy codebase below, written in various legacy languages. "
+        "Your task is to produce a complete Python application that faithfully reproduces all functionality and behavior of the original system, while "
+        "modernizing its architecture, improving its clarity, factoring the code into logical modules, and following Python best practices. "
+        "Your Python application should:\n\n"
+        "- Provide identical external behavior, including inputs, outputs, and business logic.\n"
+        "- Utilize FastAPI for HTTP endpoints (if applicable), SQLAlchemy for database interactions, and pytest for testing.\n"
+        "- Employ a clean, well-organized, and modular project structure (e.g., separate directories for routes, models, services, tests, etc.).\n"
+        "- Include comments explaining the purpose of key sections of code.\n"
+        "- Be lint-compliant, following PEP 8 guidelines.\n"
+        "- Include sufficient code-level tests to ensure correctness.\n\n"
+        "Output your solution as a set of files, using the following format:\n\n"
+        "### filename.py\n"
+        "```python\n"
+        "# code here\n"
+        "```\n\n"
+        "Include only the code files as specified, with no additional commentary. "
+        "Ensure the final solution can be directly run and tested with minimal configuration. "
+        "Don't forget any of the business logic, models, or endpoints. Be perfectly thorough.\n\n"
+        f"{combined_code}\n"
+    )
+
+    response_content = call_gemini(prompt)
+    code_files = parse_code_files_from_response_multiple_files(response_content)
+    strategy7_output_dir = os.path.join(output_dir, 'strategy7')
+    os.makedirs(strategy7_output_dir, exist_ok=True)
+    for file_name, code in code_files.items():
+        sanitized_file_name = sanitize_filename(file_name)
+        output_path = os.path.join(strategy7_output_dir, sanitized_file_name)
+        if os.path.exists(output_path):
+            print_step(f"Skipping existing file: {output_path}")
+            continue
+        print_step(f"Writing file: {output_path}")
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(code)
+    print_step("Strategy 7 completed.")
+
+
 def translate_code(code):
     print_step("Using LLM to translate code.")
     prompt = (
@@ -317,9 +368,10 @@ def generate_high_level_design(project_description):
 def implement_python_project(design, output_dir):
     print_step("Implementing Python project based on the design.")
     prompt = (
-        "As an expert Python developer, implement the Python project based on the high-level design provided below. "
+        "As a world-class Python developer, implement the Python project based on the high-level design provided below. "
         "Use SQLAlchemy for database interactions, FastAPI for HTTP endpoints, and pytest for tests. "
         "Ensure the code follows Python conventions, is well-documented with comments, and passes linting. "
+        "Fully implement each part of the system, with careful attention to detail. "
         "Provide the code files in the following format:\n\n"
         "### filename.py\n"
         "```python\n"
@@ -379,9 +431,6 @@ def implement_module(module_name, module_design, output_dir):
     for file_name, code in code_files.items():
         sanitized_file_name = sanitize_filename(file_name)
         output_path = os.path.join(output_dir, sanitized_file_name)
-        if os.path.exists(output_path):
-            print_step(f"Skipping existing file: {output_path}")
-            continue
         print_step(f"Writing file: {output_path}")
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         with open(output_path, 'w', encoding='utf-8') as f:
@@ -391,16 +440,25 @@ def implement_module(module_name, module_design, output_dir):
 def parse_code_files_from_response_multiple_files(response_content):
     print_step("Parsing code files from LLM response.")
     code_files = {}
-    pattern = r"###\s*(.*?)\n```(?:python)?\n(.*?)\n```"
+
+    # Enhanced regex pattern to handle variations in LLM output
+    pattern = (
+        r"(?:(?:#{0,3})?\s*([\w./]+))"  # Matches file paths like core/services/requester.py
+        r"\n?```(?:python)?\n"           # Matches optional 'python' code fence indicator
+        r"(.*?)"                         # Captures the code content
+        r"\n```"                         # Matches the closing backticks
+    )
+
     matches = re.finditer(pattern, response_content, re.DOTALL)
     for match in matches:
         filename = match.group(1).strip()
         code = match.group(2).strip()
         code_files[filename] = code
+
     if not code_files:
         print_step("No code files were found in the LLM response.")
-        print("LLM Response Content:")
-        print(response_content)
+        filename = f"{uuid.uuid4()}.py"
+        code_files[filename] = response_content
     return code_files
 
 
@@ -513,62 +571,67 @@ def main():
 
     strategy_scores = {}
 
-    # Strategy 1
-    strategy1_output_dir = os.path.join(output_dir, 'strategy1')
-    os.makedirs(strategy1_output_dir, exist_ok=True)
-    strategy_file_by_file_translation(
-        input_files, project_path, strategy1_output_dir
-    )
-    strategy_scores['strategy1'] = evaluate_project(strategy1_output_dir)
+    # # Strategy 1
+    # strategy1_output_dir = os.path.join(output_dir, 'strategy1')
+    # os.makedirs(strategy1_output_dir, exist_ok=True)
+    # strategy_file_by_file_translation(
+    #     input_files, project_path, strategy1_output_dir
+    # )
+    # strategy_scores['strategy1'] = evaluate_project(strategy1_output_dir)
 
-    # Strategy 1.1
-    strategy1_1_output_dir = os.path.join(output_dir, 'strategy1_1')
-    os.makedirs(strategy1_1_output_dir, exist_ok=True)
-    strategy_simplify_python_app(strategy1_output_dir, strategy1_1_output_dir)
-    strategy_scores['strategy1_1'] = evaluate_project(strategy1_1_output_dir)
+    # # Strategy 1.1
+    # strategy1_1_output_dir = os.path.join(output_dir, 'strategy1_1')
+    # os.makedirs(strategy1_1_output_dir, exist_ok=True)
+    # strategy_simplify_python_app(strategy1_output_dir, strategy1_1_output_dir)
+    # strategy_scores['strategy1_1'] = evaluate_project(strategy1_1_output_dir)
 
-    # Strategy 2
-    strategy2_output_dir = os.path.join(output_dir, 'strategy2')
-    os.makedirs(strategy2_output_dir, exist_ok=True)
-    python_files = []
-    for root, _, files in os.walk(strategy1_1_output_dir):
-        for file in files:
-            if file.endswith('.py'):
-                file_path = os.path.join(root, file)
-                python_files.append(file_path)
-    strategy_reimplement_from_python_summaries(
-        python_files, strategy1_1_output_dir, strategy2_output_dir
-    )
-    strategy_scores['strategy2'] = evaluate_project(strategy2_output_dir)
+    # # Strategy 2
+    # strategy2_output_dir = os.path.join(output_dir, 'strategy2')
+    # os.makedirs(strategy2_output_dir, exist_ok=True)
+    # python_files = []
+    # for root, _, files in os.walk(strategy1_1_output_dir):
+    #     for file in files:
+    #         if file.endswith('.py'):
+    #             file_path = os.path.join(root, file)
+    #             python_files.append(file_path)
+    # strategy_reimplement_from_python_summaries(
+    #     python_files, strategy1_1_output_dir, strategy2_output_dir
+    # )
+    # strategy_scores['strategy2'] = evaluate_project(strategy2_output_dir)
 
-    # Strategy 3
-    strategy3_output_dir = os.path.join(output_dir, 'strategy3')
-    os.makedirs(strategy3_output_dir, exist_ok=True)
-    strategy_reimplement_from_design(
-        input_files, project_path, strategy3_output_dir
-    )
-    strategy_scores['strategy3'] = evaluate_project(strategy3_output_dir)
+    # # Strategy 3
+    # strategy3_output_dir = os.path.join(output_dir, 'strategy3')
+    # os.makedirs(strategy3_output_dir, exist_ok=True)
+    # strategy_reimplement_from_design(
+    #     input_files, project_path, strategy3_output_dir
+    # )
+    # strategy_scores['strategy3'] = evaluate_project(strategy3_output_dir)
 
-    # Strategy 4
-    strategy4_output_dir = os.path.join(output_dir, 'strategy4')
-    os.makedirs(strategy4_output_dir, exist_ok=True)
-    strategy_modular_implementation(
-        input_files, project_path, strategy4_output_dir
-    )
-    strategy_scores['strategy4'] = evaluate_project(strategy4_output_dir)
+    # # Strategy 4
+    # strategy4_output_dir = os.path.join(output_dir, 'strategy4')
+    # os.makedirs(strategy4_output_dir, exist_ok=True)
+    # strategy_modular_implementation(
+    #     input_files, project_path, strategy4_output_dir
+    # )
+    # strategy_scores['strategy4'] = evaluate_project(strategy4_output_dir)
 
-    # Strategy 5 (Full Comprehensive Summary)
-    strategy5_output_dir = os.path.join(output_dir, 'strategy5')
-    os.makedirs(strategy5_output_dir, exist_ok=True)
-    full_spec_file = strategy_full_summary(input_files, project_path, output_dir)
-    # Strategy 5 does not produce executable code, so we do not evaluate it in the same way.
+    # # Strategy 5 (Full Comprehensive Summary)
+    # strategy5_output_dir = os.path.join(output_dir, 'strategy5')
+    # os.makedirs(strategy5_output_dir, exist_ok=True)
+    # full_spec_file = strategy_full_summary(input_files, project_path, output_dir)
+    # # Strategy 5 does not produce executable code, so we do not evaluate it.
 
-    # Strategy 6 (Reimplementation from Full Spec using modern stack)
-    strategy6_output_dir = os.path.join(output_dir, 'strategy6')
-    os.makedirs(strategy6_output_dir, exist_ok=True)
-    strategy_reimplement_from_full_spec(full_spec_file, output_dir)
-    # We can evaluate this if we want
-    strategy_scores['strategy6'] = evaluate_project(os.path.join(output_dir, 'strategy6'))
+    # # Strategy 6 (Reimplementation from Full Spec)
+    # strategy6_output_dir = os.path.join(output_dir, 'strategy6')
+    # os.makedirs(strategy6_output_dir, exist_ok=True)
+    # strategy_reimplement_from_full_spec(full_spec_file, output_dir)
+    # strategy_scores['strategy6'] = evaluate_project(os.path.join(output_dir, 'strategy6'))
+
+    # Strategy 7 (Full Rewrite from Entire Source in One Prompt)
+    strategy7_output_dir = os.path.join(output_dir, 'strategy7')
+    os.makedirs(strategy7_output_dir, exist_ok=True)
+    strategy_full_rewrite_from_entire_source(input_files, project_path, output_dir)
+    strategy_scores['strategy7'] = evaluate_project(os.path.join(output_dir, 'strategy7'))
 
     # Select the best strategy (among the ones producing code)
     best_strategy = max(strategy_scores, key=strategy_scores.get)
