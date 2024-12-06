@@ -118,6 +118,80 @@ def strategy_modular_implementation(input_files, project_dir, output_dir):
     print_step("Strategy 4 completed.")
 
 
+def strategy_full_summary(input_files, project_dir, output_dir):
+    print_step("Starting Strategy 5: Full Comprehensive Summary for Complete Replacement.")
+    all_code_segments = []
+    for file_path in input_files:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            code = f.read()
+            all_code_segments.append(f"\n[FILE]: {file_path}\n{code}\n")
+    combined_code = "\n".join(all_code_segments)
+
+    prompt = (
+        "You are a systems analyst tasked with producing a fully comprehensive specification of an entire software system, given all of its source code. "
+        "Your specification should enable someone to re-implement the system with absolutely identical external behavior, without any guidance from the original code. "
+        "The specification should include:\n\n"
+        "- A complete description of all external inputs and outputs of the system.\n"
+        "- A detailed description of all external interfaces (for example, endpoints if present), including every parameter and data structure.\n"
+        "- A precise and exhaustive description of any persistent storage schema, including all entities, their fields, constraints, and relationships.\n"
+        "- A step-by-step description of the business logic, including how data flows between interfaces and storage.\n"
+        "- An exhaustive outline of all internal components, their responsibilities, their interactions, and the logic that each implements.\n\n"
+        "Do not mention any specific programming languages, frameworks, or technologies. Focus solely on the domain logic, the data that flows through the system, "
+        "the transformations that occur, and the interfaces and storage mechanisms from a conceptual perspective. The goal is for the resulting specification to be so "
+        "detailed and precise that the entire software could be re-created with identical input/output behavior.\n\n"
+        "Provide only the specification, without any additional commentary or introduction.\n\n"
+        f"{combined_code}\n"
+    )
+    specification = call_gemini(prompt)
+    specification_text = specification.strip()
+
+    strategy5_output_dir = os.path.join(output_dir, 'strategy5')
+    os.makedirs(strategy5_output_dir, exist_ok=True)
+    spec_file_path = os.path.join(strategy5_output_dir, "full_system_specification.txt")
+    with open(spec_file_path, 'w', encoding='utf-8') as f:
+        f.write(specification_text)
+
+    print_step("Strategy 5 completed.")
+    return spec_file_path
+
+
+def strategy_reimplement_from_full_spec(spec_file_path, output_dir):
+    print_step("Starting Strategy 6: Reimplementing from the Full Comprehensive Specification.")
+    with open(spec_file_path, 'r', encoding='utf-8') as f:
+        full_spec = f.read()
+
+    prompt = (
+        "As an expert Python developer, implement a new project described fully by the specification below. "
+        "Use FastAPI for the HTTP interface, SQLAlchemy for database interactions, Alembic for database migrations, "
+        "and follow a blueprint (modular) pattern for structuring the code. "
+        "Organize the project using modern Python best practices (e.g., separate directories for routes, models, services, etc.). "
+        "Ensure the code follows Python best practices, is well-commented, and can be run and tested. "
+        "All functionality, inputs, and outputs must match the specification exactly.\n\n"
+        "Provide the code files in the following format:\n\n"
+        "### filename.py\n"
+        "```python\n"
+        "# code here\n"
+        "```\n\n"
+        "Provide only the code files as specified, without any additional text.\n\n"
+        f"{full_spec}\n"
+    )
+    response_content = call_gemini(prompt)
+    code_files = parse_code_files_from_response_multiple_files(response_content)
+    strategy6_output_dir = os.path.join(output_dir, 'strategy6')
+    os.makedirs(strategy6_output_dir, exist_ok=True)
+    for file_name, code in code_files.items():
+        sanitized_file_name = sanitize_filename(file_name)
+        output_path = os.path.join(strategy6_output_dir, sanitized_file_name)
+        if os.path.exists(output_path):
+            print_step(f"Skipping existing file: {output_path}")
+            continue
+        print_step(f"Writing file: {output_path}")
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(code)
+    print_step("Strategy 6 completed.")
+
+
 def translate_code(code):
     print_step("Using LLM to translate code.")
     prompt = (
@@ -279,8 +353,6 @@ def parse_modules_from_design(design):
     print_step("Parsing modules from high-level design.")
     modules = {}
     module_sections = re.split(r"Module:\s*(.*?)\n", design)
-    # module_sections will have ['', module_name1, module_design1, module_name2, module_design2, ...]
-    # So we need to process it accordingly
     for i in range(1, len(module_sections), 2):
         module_name = module_sections[i].strip()
         module_design = module_sections[i + 1].strip()
@@ -399,7 +471,6 @@ def call_gemini(prompt):
             response = model.generate_content(
                 prompt,
                 generation_config=genai.types.GenerationConfig(
-                    # Only one candidate for now.
                     candidate_count=1,
                     temperature=0.8,
                 ),
@@ -422,7 +493,7 @@ def call_gemini(prompt):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Port a project to Python using the Google PaLM API.'
+        description='Port a project and produce various implementation strategies.'
     )
     parser.add_argument(
         'project_path', help='Path to the project git repository.'
@@ -459,7 +530,6 @@ def main():
     # Strategy 2
     strategy2_output_dir = os.path.join(output_dir, 'strategy2')
     os.makedirs(strategy2_output_dir, exist_ok=True)
-    # Get the simplified Python files from strategy 1.1
     python_files = []
     for root, _, files in os.walk(strategy1_1_output_dir):
         for file in files:
@@ -487,7 +557,20 @@ def main():
     )
     strategy_scores['strategy4'] = evaluate_project(strategy4_output_dir)
 
-    # Select the best strategy
+    # Strategy 5 (Full Comprehensive Summary)
+    strategy5_output_dir = os.path.join(output_dir, 'strategy5')
+    os.makedirs(strategy5_output_dir, exist_ok=True)
+    full_spec_file = strategy_full_summary(input_files, project_path, output_dir)
+    # Strategy 5 does not produce executable code, so we do not evaluate it in the same way.
+
+    # Strategy 6 (Reimplementation from Full Spec using modern stack)
+    strategy6_output_dir = os.path.join(output_dir, 'strategy6')
+    os.makedirs(strategy6_output_dir, exist_ok=True)
+    strategy_reimplement_from_full_spec(full_spec_file, output_dir)
+    # We can evaluate this if we want
+    strategy_scores['strategy6'] = evaluate_project(os.path.join(output_dir, 'strategy6'))
+
+    # Select the best strategy (among the ones producing code)
     best_strategy = max(strategy_scores, key=strategy_scores.get)
     print_step(f"Selected {best_strategy} as the best strategy.")
 
