@@ -19,6 +19,7 @@ Prerequisites:
 - Python 3.9+
 - openai (pip install openai)
 - pydantic (for validation and prompt structuring)
+- tqdm (for progress bars: pip install tqdm)
 - A directory of legacy Java code that you want to convert.
 
 Usage:
@@ -30,13 +31,16 @@ import os
 import sys
 import argparse
 from pathlib import Path
-import openai
+import google.generativeai as genai
 from openai import OpenAI
 from typing import List, Dict
 from pydantic import BaseModel
+from tqdm import tqdm
 
+openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
+genai.configure(api_key=os.environ['GEMINI_API_KEY'])
+model = genai.GenerativeModel(model_name='gemini-1.5-flash-8b')
 
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
 # ------------------------------------------------------------------------------------
 # Prompt engineering and data structures
 # ------------------------------------------------------------------------------------
@@ -56,7 +60,6 @@ class TransformStep(BaseModel):
 # ------------------------------------------------------------------------------------
 # Prompt templates and instructions
 # ------------------------------------------------------------------------------------
-
 
 INTRO_PROMPT = """You are a world-class expert in converting legacy Java codebases to modern Python web backends using FastAPI, SQLAlchemy, and Alembic for migrations. You also produce comprehensive unit tests using pytest, and ensure that all code is fully documented, idiomatic, and clean. You use Python best practices, type hints, and docstrings in Google style.
 
@@ -111,85 +114,89 @@ Make sure the resulting code is self-contained, understandable, and runs as a st
 # Functions
 # ------------------------------------------------------------------------------------
 
+
 def gather_java_files(input_dir: Path) -> List[FileContext]:
     """Recursively gather all .java files from the given directory."""
+    print("Step 1: Gathering Java files...")
     java_files = []
-    for f in input_dir.rglob("*.java"):
+    all_files = list(input_dir.rglob("*.java"))
+    for f in tqdm(all_files, desc="Reading Java files", unit="file"):
         with f.open("r", encoding="utf-8") as file:
             content = file.read()
         rel_path = str(f.relative_to(input_dir))
         java_files.append(FileContext(relative_path=rel_path, content=content))
     return java_files
 
-def call_openai_chat_completion(messages: List[Dict[str, str]], model: str="gpt-4", temperature: float=0.0, max_tokens: int=8000) -> str:
+
+def call_openai_chat_completion(messages: List[Dict[str, str]], model: str = "gpt-4", temperature: float = 0.0, max_tokens: int = 8000) -> str:
     """Call the OpenAI Chat API and return the response content."""
-    if not client.api_key:
+    if not openai_client.api_key:
         raise ValueError("OPENAI_API_KEY environment variable not set.")
-    response = client.chat.completions.create(model=model,
-    messages=messages,
-    temperature=temperature,
-    max_tokens=max_tokens)
+
+    # Since this is a single request that may take some time, we can show a simple message:
+    print("Contacting the LLM to transform your code... Please wait.")
+
+    response = openai_client.chat.completions.create(model=model,
+                                                     messages=messages,
+                                                     temperature=temperature,
+                                                     max_tokens=max_tokens)
     return response.choices[0].message.content
+
+
+def call_gemini(prompt):
+    max_retries = 15
+    retry_delay = 1  # Start with 1-second delay
+
+    for attempt in range(max_retries):
+        try:
+            response = model.generate_content(
+                prompt,
+                generation_config=genai.types.GenerationConfig(
+                    candidate_count=1,
+                    temperature=0.8,
+                ),
+                stream=True,
+            )
+            chunks = ""
+            for chunk in response:
+                print(chunk.text, end='', flush=True)
+                chunks += chunk.text
+            return chunks
+        except Exception as e:
+            print_step(
+                f"Error generating response: {e}. Retrying in {retry_delay} seconds..."
+            )
+            time.sleep(retry_delay)
+            retry_delay *= 2  # Exponential backoff
+    print_step("Failed to get a valid response from the Google PaLM API.")
+    return ''
+
 
 def transform_code(java_files: List[FileContext]) -> str:
     """Send the Java files to the LLM and get back the Python code."""
+    print("Step 2: Transforming code with the LLM...")
     file_list_str = ""
     for jf in java_files:
         file_list_str += f"File: {jf.relative_path}\n```\n{jf.content}\n```\n\n"
 
-    messages = [
-        {"role": "system", "content": INTRO_PROMPT},
-        {"role": "user", "content": TRANSFORM_PROMPT_TEMPLATE.format(file_list=file_list_str)}
-    ]
-    output = call_openai_chat_completion(messages)
+    prompt = TRANSFORM_PROMPT_TEMPLATE.format(file_list=file_list_str)
+    output = call_llm(prompt)
     return output
+
 
 def write_output_structure(output_str: str, output_dir: Path) -> None:
     """
     The LLM output is expected to contain a structured representation of all files,
     possibly as a directory tree. We will parse that structure and write files accordingly.
-
-    Expected format:
-    The assistant may produce a structure like:
-
-    ```
-    app/
-        main.py
-        models.py
-        schemas.py
-        routers/
-            __init__.py
-            items.py
-    alembic/
-        versions/
-            20230101_init.py
-    tests/
-        test_main.py
-    requirements.txt
-
-    <BEGIN FILE: app/main.py>
-    ...file content...
-    <END FILE>
-
-    <BEGIN FILE: app/models.py>
-    ...file content...
-    <END FILE>
-
-    ...
-    ```
-
-    We will parse this format and write out files accordingly.
     """
-
-    # Simple parser for a BEGIN FILE / END FILE pattern.
-    # We'll look for lines matching <BEGIN FILE: filename> and <END FILE>
-    # Everything in between is file content.
+    print("Step 3: Writing output files...")
 
     lines = output_str.splitlines()
     current_file = None
     current_content = []
     file_map = {}  # filename -> content
 
+    # Parse the LLM output to extract files
     for line in lines:
         stripped = line.strip()
         if stripped.startswith("<BEGIN FILE:"):
@@ -214,12 +221,25 @@ def write_output_structure(output_str: str, output_dir: Path) -> None:
     if current_file is not None:
         file_map[current_file] = "\n".join(current_content)
 
-    # Write files
-    for fname, fcontent in file_map.items():
+    # Write files with a progress bar
+    file_items = list(file_map.items())
+    for fname, fcontent in tqdm(file_items, desc="Writing files", unit="file"):
         fpath = output_dir / fname
         fpath.parent.mkdir(parents=True, exist_ok=True)
         with fpath.open("w", encoding="utf-8") as f:
             f.write(fcontent)
+
+
+def call_llm(prompt):
+    if openai_client.api_key is not None:
+        messages = [
+            {"role": "system", "content": INTRO_PROMPT},
+            {"role": "user", "content": prompt},
+        ]
+        return call_openai_chat_completion(messages)
+    else:
+        return call_gemini(f"{INTRO_PROMPT}\n\n{prompt}")
+
 
 def main():
     parser = argparse.ArgumentParser(description="Auto-port a legacy Java codebase to Python (FastAPI + SQLAlchemy) using LLMs.")
@@ -234,21 +254,16 @@ def main():
         print(f"Input directory {input_dir} does not exist.", file=sys.stderr)
         sys.exit(1)
 
-    # Gather Java code
     java_files = gather_java_files(input_dir)
     if not java_files:
         print(f"No Java files found in {input_dir}.", file=sys.stderr)
         sys.exit(1)
 
-    print("Transforming Java code to Python... This may take a while.")
     output_str = transform_code(java_files)
-
-    print("Writing output files...")
     write_output_structure(output_str, output_dir)
+
     print(f"Done! Python application is now in {output_dir}.")
 
-    # Optionally, run 'black' or 'ruff' to format/check code if you want
-    # but we assume the LLM code is perfect. The world is in awe.
 
 if __name__ == "__main__":
     main()
