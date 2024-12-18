@@ -20,9 +20,8 @@ def analyze_project(project_path):
     input_files = []
     for root, _, files in os.walk(project_path):
         for file in files:
-            if file.endswith(('.cs', '.vb', '.fs', '.java')):
-                file_path = os.path.join(root, file)
-                input_files.append(file_path)
+            file_path = os.path.join(root, file)
+            input_files.append(file_path)
     print_step(f"Found {len(input_files)} source files.")
     return input_files
 
@@ -38,8 +37,11 @@ def strategy_file_by_file_translation(input_files, project_path, output_dir):
             tqdm.write(f"Skipping existing file: {output_path}")
             continue
         tqdm.write(f"Translating {file_path} -> {output_path}")
-        with open(file_path, 'r', encoding='utf-8') as f:
-            code = f.read()
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                code = f.read()
+        except: UnicodeDecodeError
+            pass
         translated_code = translate_code(code)
         if not translated_code:
             tqdm.write(f"Translation failed for {file_path}. Skipping.")
@@ -564,68 +566,70 @@ def main():
     args = parser.parse_args()
 
     project_path = os.path.abspath(args.project_path)
-    output_dir = f"{project_path}-{MODEL_NAME}"
+    output_dir = args.output_dir
+    if output_dir is None:
+        output_dir = f"{project_path}-{MODEL_NAME}"
 
     print_step("Starting the porting process.")
     input_files = analyze_project(project_path)
 
     strategy_scores = {}
 
-    # # Strategy 1
-    # strategy1_output_dir = os.path.join(output_dir, 'strategy1')
-    # os.makedirs(strategy1_output_dir, exist_ok=True)
-    # strategy_file_by_file_translation(
-    #     input_files, project_path, strategy1_output_dir
-    # )
-    # strategy_scores['strategy1'] = evaluate_project(strategy1_output_dir)
+    # Strategy 1
+    strategy1_output_dir = os.path.join(output_dir, 'strategy1')
+    os.makedirs(strategy1_output_dir, exist_ok=True)
+    strategy_file_by_file_translation(
+        input_files, project_path, strategy1_output_dir
+    )
+    strategy_scores['strategy1'] = evaluate_project(strategy1_output_dir)
 
-    # # Strategy 1.1
-    # strategy1_1_output_dir = os.path.join(output_dir, 'strategy1_1')
-    # os.makedirs(strategy1_1_output_dir, exist_ok=True)
-    # strategy_simplify_python_app(strategy1_output_dir, strategy1_1_output_dir)
-    # strategy_scores['strategy1_1'] = evaluate_project(strategy1_1_output_dir)
+    # Strategy 1.1
+    strategy1_1_output_dir = os.path.join(output_dir, 'strategy1_1')
+    os.makedirs(strategy1_1_output_dir, exist_ok=True)
+    strategy_simplify_python_app(strategy1_output_dir, strategy1_1_output_dir)
+    strategy_scores['strategy1_1'] = evaluate_project(strategy1_1_output_dir)
 
-    # # Strategy 2
-    # strategy2_output_dir = os.path.join(output_dir, 'strategy2')
-    # os.makedirs(strategy2_output_dir, exist_ok=True)
-    # python_files = []
-    # for root, _, files in os.walk(strategy1_1_output_dir):
-    #     for file in files:
-    #         if file.endswith('.py'):
-    #             file_path = os.path.join(root, file)
-    #             python_files.append(file_path)
-    # strategy_reimplement_from_python_summaries(
-    #     python_files, strategy1_1_output_dir, strategy2_output_dir
-    # )
-    # strategy_scores['strategy2'] = evaluate_project(strategy2_output_dir)
+    # Strategy 2
+    strategy2_output_dir = os.path.join(output_dir, 'strategy2')
+    os.makedirs(strategy2_output_dir, exist_ok=True)
+    python_files = []
+    for root, _, files in os.walk(strategy1_1_output_dir):
+        for file in files:
+            if file.endswith('.py'):
+                file_path = os.path.join(root, file)
+                python_files.append(file_path)
+    strategy_reimplement_from_python_summaries(
+        python_files, strategy1_1_output_dir, strategy2_output_dir
+    )
+    strategy_scores['strategy2'] = evaluate_project(strategy2_output_dir)
 
-    # # Strategy 3
-    # strategy3_output_dir = os.path.join(output_dir, 'strategy3')
-    # os.makedirs(strategy3_output_dir, exist_ok=True)
-    # strategy_reimplement_from_design(
-    #     input_files, project_path, strategy3_output_dir
-    # )
-    # strategy_scores['strategy3'] = evaluate_project(strategy3_output_dir)
+    # Strategy 3
+    strategy3_output_dir = os.path.join(output_dir, 'strategy3')
+    os.makedirs(strategy3_output_dir, exist_ok=True)
+    strategy_reimplement_from_design(
+        input_files, project_path, strategy3_output_dir
+    )
+    strategy_scores['strategy3'] = evaluate_project(strategy3_output_dir)
 
-    # # Strategy 4
-    # strategy4_output_dir = os.path.join(output_dir, 'strategy4')
-    # os.makedirs(strategy4_output_dir, exist_ok=True)
-    # strategy_modular_implementation(
-    #     input_files, project_path, strategy4_output_dir
-    # )
-    # strategy_scores['strategy4'] = evaluate_project(strategy4_output_dir)
+    # Strategy 4
+    strategy4_output_dir = os.path.join(output_dir, 'strategy4')
+    os.makedirs(strategy4_output_dir, exist_ok=True)
+    strategy_modular_implementation(
+        input_files, project_path, strategy4_output_dir
+    )
+    strategy_scores['strategy4'] = evaluate_project(strategy4_output_dir)
 
-    # # Strategy 5 (Full Comprehensive Summary)
-    # strategy5_output_dir = os.path.join(output_dir, 'strategy5')
-    # os.makedirs(strategy5_output_dir, exist_ok=True)
-    # full_spec_file = strategy_full_summary(input_files, project_path, output_dir)
-    # # Strategy 5 does not produce executable code, so we do not evaluate it.
+    # Strategy 5 (Full Comprehensive Summary)
+    strategy5_output_dir = os.path.join(output_dir, 'strategy5')
+    os.makedirs(strategy5_output_dir, exist_ok=True)
+    full_spec_file = strategy_full_summary(input_files, project_path, output_dir)
+    # Strategy 5 does not produce executable code, so we do not evaluate it.
 
-    # # Strategy 6 (Reimplementation from Full Spec)
-    # strategy6_output_dir = os.path.join(output_dir, 'strategy6')
-    # os.makedirs(strategy6_output_dir, exist_ok=True)
-    # strategy_reimplement_from_full_spec(full_spec_file, output_dir)
-    # strategy_scores['strategy6'] = evaluate_project(os.path.join(output_dir, 'strategy6'))
+    # Strategy 6 (Reimplementation from Full Spec)
+    strategy6_output_dir = os.path.join(output_dir, 'strategy6')
+    os.makedirs(strategy6_output_dir, exist_ok=True)
+    strategy_reimplement_from_full_spec(full_spec_file, output_dir)
+    strategy_scores['strategy6'] = evaluate_project(os.path.join(output_dir, 'strategy6'))
 
     # Strategy 7 (Full Rewrite from Entire Source in One Prompt)
     strategy7_output_dir = os.path.join(output_dir, 'strategy7')
