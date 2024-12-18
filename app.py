@@ -560,7 +560,6 @@ def main():
     )
     parser.add_argument(
         '--output_dir',
-        default='python_project',
         help='Directory to output the Python project.',
     )
     args = parser.parse_args()
