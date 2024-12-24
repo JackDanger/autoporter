@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 
 """
-Usage:
-    python migrate_angular_to_react.py --source_dir <SOURCE_DIR> --output_dir <OUTPUT_DIR> [--force]
+usage:
+    python migrate_angular_to_react.py --source_dir <source_dir> --output_dir <output_dir> [--force]
 
-Description:
+description:
     This script converts a legacy AngularJS application to a React application,
     storing intermediate states in an SQLite database, providing a progress bar
     for file processing, and allowing interruption/resumption.
@@ -17,7 +17,7 @@ import sqlite3
 import argparse
 import logging
 from tqdm import tqdm
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString
 
 # ---------------------------------------------------------------------------
 # Configuration & Logging
@@ -43,14 +43,14 @@ def infer(prompt: str) -> str:
 # ---------------------------------------------------------------------------
 # Database Utilities
 # ---------------------------------------------------------------------------
-DB_NAME = "migration_state.db"
+db_name = "migration_state.db"
 
 
 def init_db() -> None:
     """
     Initialize the SQLite database if it doesn't already exist.
     """
-    conn = sqlite3.connect(DB_NAME)
+    conn = sqlite3.connect(db_name)
     try:
         conn.execute(
             """
@@ -71,7 +71,7 @@ def get_conversion_status(file_path: str):
     Return a tuple of (status, output_file_path, error_msg) for the given
     file_path, or None if it doesn't exist in the DB.
     """
-    conn = sqlite3.connect(DB_NAME)
+    conn = sqlite3.connect(db_name)
     try:
         cur = conn.cursor()
         cur.execute(
@@ -97,7 +97,7 @@ def update_conversion_status(
     """
     Insert or update the conversion status for a given file_path.
     """
-    conn = sqlite3.connect(DB_NAME)
+    conn = sqlite3.connect(db_name)
     try:
         conn.execute(
             """
@@ -148,7 +148,7 @@ def parse_js(js_content: str):
 
 def is_angular_module_file(file_path: str) -> bool:
     """
-    Simple check for Angular module files, e.g. ends with '-module.js'.
+    Simple check for Angular module files, e.g., ends with '-module.js'.
     """
     return file_path.endswith('-module.js')
 
@@ -174,79 +174,89 @@ def generate_react_component_from_controller(
     """
     Converts an Angular controller to a React component using the LLM.
     """
-    prompt = f"""
-You are an expert JavaScript developer skilled at converting AngularJS components to ReactJS.
-You'll be provided with an AngularJS controller and relevant dependencies.
-Convert the following AngularJS controller to a functional React component that uses hooks.
-Follow these rules:
-1. Convert $scope properties to useState/useRef.
-2. Convert Angular services to plain JS objects with import statements.
-3. Convert Angular event listeners to React equivalents.
-4. Convert Angular dependency injection to props or import statements.
-5. Use functional components with React Hooks for state and lifecycle.
-6. Use JS (no TypeScript).
-7. Use proper JS import statements for all dependencies.
-8. For shared state, recommend React Context.
-9. Comment all code for clarity.
-10. Return only the converted React component code (with imports).
-11. Translate any 'this' references appropriately.
-12. No external state management library; if state is shared, mention createContext.
-13. Output in ES6 JavaScript (no TypeScript).
-
-AngularJS Controller:
-```javascript
-{controller_content}
-```
-
-Dependencies:
-```javascript
-{dependencies}
-```
-    """
+    prompt = (
+        "You are an expert JavaScript developer skilled at converting AngularJS components to ReactJS.\n"
+        "You'll be provided with an AngularJS controller and relevant dependencies.\n"
+        "Convert the following AngularJS controller to a functional React component that uses hooks.\n"
+        "Follow these rules:\n"
+        "1. Convert $scope properties to useState/useRef.\n"
+        "2. Convert Angular services to plain JS objects with import statements.\n"
+        "3. Convert Angular event listeners to React equivalents.\n"
+        "4. Convert Angular dependency injection to props or import statements.\n"
+        "5. Use functional components with React Hooks for state and lifecycle.\n"
+        "6. Use JS (no TypeScript).\n"
+        "7. Use proper JS import statements for all dependencies.\n"
+        "8. For shared state, recommend React context.\n"
+        "9. Comment all code for clarity.\n"
+        "10. Return only the converted React component code (with imports).\n"
+        "11. Translate any 'this' references appropriately.\n"
+        "12. No external state management library; if state is shared, mention createContext.\n"
+        "13. Output in ES6 JavaScript (no TypeScript).\n"
+        "\n"
+        "AngularJS Controller:\n"
+        "```javascript\n"
+        f"{controller_content}\n"
+        "```\n"
+        "\n"
+        "Dependencies:\n"
+        "```javascript\n"
+        f"{dependencies}\n"
+        "```\n"
+    )
     return infer(prompt)
 
 
-def generate_react_component_from_html_template(template_content: str) -> str:
+def generate_react_component_from_html_template(template_content: str, file_path:str) -> str:
     """
     Converts an HTML template to a React component using the LLM.
     """
-    prompt = f"""
-You are an expert JavaScript developer skilled at converting AngularJS HTML templates to ReactJS.
-Convert the following AngularJS HTML template to a React component:
-1. Translate angular directives (e.g. ng-show, ng-repeat) to React equivalents.
-2. Use JSX syntax.
-3. Use descriptive classNames.
-4. Return a valid React component with necessary import statements.
-5. All attributes must be valid React attributes.
-6. Do not assume a styling library; inline if needed.
-7. Output in ES6 JS, not TypeScript.
-
-HTML Template:
-```html
-{template_content}
-```
-    """
+    prompt = (
+        "You are an expert JavaScript developer skilled at converting AngularJS HTML templates to ReactJS.\n"
+        "Convert the following AngularJS HTML template to a React component.\n"
+        "Follow these rules:\n"
+        "1. Translate any Angular-specific directives (e.g., ng-show, ng-repeat, ng-if, ng-click, ng-model)\n"
+        "   to their React equivalents using React’s JSX syntax and React’s hooks (e.g., useState, conditional rendering, etc.).\n"
+        "2. Use JSX syntax.\n"
+        "3. Use descriptive class names.\n"
+        "4. Return a valid functional React component with necessary import statements, making sure that any state used is managed using hooks.\n"
+        "5. Convert Angular event handlers like ng-click into React’s onClick syntax, ensuring that events are handled correctly within the React Component.\n"
+        "6. Convert any binding like {{property}} to JSX syntax.  Make sure to handle both one-way and two-way binding.\n"
+        "7. All attributes must be valid React attributes.\n"
+        "8. Do not assume any particular styling library; use inline styles only if necessary.\n"
+        "9. Handle conditional rendering with JSX ternary operator or logical &&.\n"
+        "10. Use Fragments (<></>) when needed to avoid extra divs.\n"
+        "11. Output in ES6 JavaScript, not TypeScript.\n"
+        "12. If the HTML template is a gridCellTemplate, create a separate React component that can be used as a template, and then import it into the parent component using props.\n"
+        "13. If the HTML template contains a table, make sure the html table is rendered properly with proper headers and cells.  Use map if needed to dynamically render table rows.\n"
+        "14. If the file_path contains gridHeaderTemplate, then make sure to generate JSX for the table headers and not the whole table.\n"
+        "\n"
+        "HTML Template:\n"
+        "```html\n"
+        f"{template_content}\n"
+        "```\n"
+    )
     return infer(prompt)
+
 
 
 def convert_angular_module(module_content: str) -> str:
     """
     Converts an Angular module to a React equivalent or plain JS file using the LLM.
     """
-    prompt = f"""
-You are an expert JavaScript developer skilled at converting AngularJS modules to ReactJS.
-Convert the following AngularJS module to either a React context or a simple JS file:
-1. Translate AngularJS services/values to JS objects or contexts.
-2. Use ES6 import and export statements.
-3. If services are used throughout, convert them into a React Context.
-4. Include explanatory comments.
-5. Output ES6 JavaScript (no TypeScript).
-
-AngularJS Module:
-```javascript
-{module_content}
-```
-    """
+    prompt = (
+        "You are an expert JavaScript developer skilled at converting AngularJS modules to ReactJS.\n"
+        "Convert the following AngularJS module to either a React context or a simple JS file:\n"
+        "1. Translate AngularJS services/values to JS objects or contexts.\n"
+        "2. Use ES6 import and export statements.\n"
+        "3. If services are used throughout, convert them into a React context.\n"
+        "4. Include explanatory comments.\n"
+        "5. Output ES6 JavaScript (no TypeScript).\n"
+        "\n"
+        "AngularJS Module:\n"
+        "```javascript\n"
+        f"{module_content}\n"
+        "```\n"
+    )
     return infer(prompt)
 
 
@@ -267,7 +277,7 @@ def handle_html_file(
     file_path: str, source_dir: str, output_dir: str, force: bool
 ) -> None:
     """
-    Handle conversion of HTML files to React components.
+    Handles conversion of HTML files to React components.
     """
     record = get_conversion_status(file_path)
     if record and record[0] == "success" and not force:
@@ -275,11 +285,11 @@ def handle_html_file(
 
     file_content = extract_file_content(file_path)
     if not file_content:
-        update_conversion_status(file_path, "error", error_msg="Empty or unreadable file")
+        update_conversion_status(file_path, "error", error_msg="empty or unreadable file")
         return
 
     try:
-        react_component_code = generate_react_component_from_html_template(file_content)
+        react_component_code = generate_react_component_from_html_template(file_content, file_path)
         if react_component_code:
             rel_path = os.path.relpath(file_path, source_dir)
             output_file_path = os.path.join(
@@ -292,13 +302,12 @@ def handle_html_file(
         logging.error("Error processing HTML file %s: %s", file_path, exc)
         update_conversion_status(file_path, "error", error_msg=str(exc))
 
-
 def handle_angular_module_file(
     file_path: str, source_dir: str, output_dir: str,
     angular_modules: dict, force: bool
 ) -> None:
     """
-    Handle conversion of Angular module files to React equivalents.
+    Handles conversion of Angular module files to React equivalents.
     """
     record = get_conversion_status(file_path)
     if record and record[0] == "success" and not force:
@@ -306,7 +315,7 @@ def handle_angular_module_file(
 
     file_content = extract_file_content(file_path)
     if not file_content:
-        update_conversion_status(file_path, "error", error_msg="Empty or unreadable file")
+        update_conversion_status(file_path, "error", error_msg="empty or unreadable file")
         return
 
     try:
@@ -330,7 +339,7 @@ def handle_angular_controller_file(
     angular_modules: dict, force: bool
 ) -> None:
     """
-    Handle conversion of Angular controller files to React components.
+    Handles conversion of Angular controller files to React components.
     """
     record = get_conversion_status(file_path)
     if record and record[0] == "success" and not force:
@@ -338,7 +347,7 @@ def handle_angular_controller_file(
 
     file_content = extract_file_content(file_path)
     if not file_content:
-        update_conversion_status(file_path, "error", error_msg="Empty or unreadable file")
+        update_conversion_status(file_path, "error", error_msg="empty or unreadable file")
         return
 
     try:
@@ -378,7 +387,7 @@ def handle_generic_js_file(
     file_path: str, source_dir: str, output_dir: str, force: bool
 ) -> None:
     """
-    Handle copying over generic JS files that don't match Angular patterns.
+    Handles copying over generic JS files that don't match Angular patterns.
     """
     record = get_conversion_status(file_path)
     if record and record[0] == "success" and not force:
@@ -386,7 +395,7 @@ def handle_generic_js_file(
 
     file_content = extract_file_content(file_path)
     if not file_content:
-        update_conversion_status(file_path, "error", error_msg="Empty or unreadable file")
+        update_conversion_status(file_path, "error", error_msg="empty or unreadable file")
         return
 
     try:
@@ -404,7 +413,7 @@ def handle_other_file(
     file_path: str, source_dir: str, output_dir: str, force: bool
 ) -> None:
     """
-    Handle copying over other file types unchanged.
+    Handles copying over other file types unchanged.
     """
     record = get_conversion_status(file_path)
     if record and record[0] == "success" and not force:
@@ -412,7 +421,7 @@ def handle_other_file(
 
     file_content = extract_file_content(file_path)
     if not file_content:
-        update_conversion_status(file_path, "error", error_msg="Empty or unreadable file")
+        update_conversion_status(file_path, "error", error_msg="empty or unreadable file")
         return
 
     try:
@@ -434,7 +443,7 @@ def process_file(
     force: bool = False
 ) -> None:
     """
-    Route files to the correct handler based on file extension and Angular usage.
+    Routes files to the correct handler based on file extension and Angular usage.
     """
     if file_path.endswith('.html'):
         handle_html_file(file_path, source_dir, output_dir, force)
@@ -495,7 +504,7 @@ def main():
                 continue
 
     # 4. Process each file with a progress bar
-    for file_path in tqdm(file_paths, desc="Converting Files"):
+    for file_path in tqdm(file_paths, desc="Converting files"):
         process_file(
             file_path,
             args.source_dir,
@@ -505,7 +514,7 @@ def main():
         )
 
     # 5. Done
-    logging.info("Conversion complete. See '%s' for details.", DB_NAME)
+    logging.info("Conversion complete. See '%s' for details.", db_name)
 
 
 if __name__ == "__main__":
