@@ -12,12 +12,14 @@ description:
 """
 
 import os
-import ast
+import re
 import sqlite3
 import argparse
 import logging
 from tqdm import tqdm
 from bs4 import BeautifulSoup, NavigableString
+import subprocess
+import json
 
 # ---------------------------------------------------------------------------
 # Configuration & Logging
@@ -58,7 +60,8 @@ def init_db() -> None:
                 file_path TEXT PRIMARY KEY,
                 status TEXT,
                 output_file_path TEXT,
-                error_msg TEXT
+                error_msg TEXT,
+                iteration_count INTEGER DEFAULT 0
             )
             """
         )
@@ -68,7 +71,7 @@ def init_db() -> None:
 
 def get_conversion_status(file_path: str):
     """
-    Return a tuple of (status, output_file_path, error_msg) for the given
+    Return a tuple of (status, output_file_path, error_msg, iteration_count) for the given
     file_path, or None if it doesn't exist in the DB.
     """
     conn = sqlite3.connect(db_name)
@@ -76,7 +79,7 @@ def get_conversion_status(file_path: str):
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT status, output_file_path, error_msg
+            SELECT status, output_file_path, error_msg, iteration_count
             FROM converted_files
             WHERE file_path=?
             """,
@@ -92,7 +95,8 @@ def update_conversion_status(
     file_path: str,
     status: str,
     output_file_path: str = None,
-    error_msg: str = None
+    error_msg: str = None,
+    iteration_count:int = 0
 ) -> None:
     """
     Insert or update the conversion status for a given file_path.
@@ -102,15 +106,16 @@ def update_conversion_status(
         conn.execute(
             """
             INSERT INTO converted_files
-            (file_path, status, output_file_path, error_msg)
-            VALUES (?, ?, ?, ?)
+            (file_path, status, output_file_path, error_msg, iteration_count)
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(file_path)
             DO UPDATE SET
               status=excluded.status,
               output_file_path=excluded.output_file_path,
-              error_msg=excluded.error_msg
+              error_msg=excluded.error_msg,
+              iteration_count = excluded.iteration_count
             """,
-            (file_path, status, output_file_path, error_msg),
+            (file_path, status, output_file_path, error_msg, iteration_count),
         )
         conn.commit()
     finally:
@@ -132,17 +137,25 @@ def parse_html(html_content: str) -> BeautifulSoup:
         return None
 
 
-def parse_js(js_content: str):
+def parse_js(js_file: str) -> dict:
     """
-    Parses JavaScript content into an AST.
+    Parses JavaScript content using esprima via subprocess.
     """
     try:
-        return ast.parse(js_content)
-    except SyntaxError as err:
-        logging.error("SyntaxError parsing JS: %s", err)
+        result = subprocess.run(
+            ["node", "parse_js_esprima.js", js_file],
+            capture_output=True, text=True, check=True
+        )
+        if result.returncode == 0:
+          return json.loads(result.stdout)
+        else:
+          logging.error("Error parsing Javascript with esprima, stderr: %s", result.stderr)
+          return None
+    except FileNotFoundError:
+        logging.error("Error: parse_js_esprima.js not found. Make sure it's in the same directory")
         return None
-    except Exception as exc:
-        logging.error("Error parsing JS: %s", exc)
+    except Exception as e:
+        logging.error(f"Error parsing JavaScript: {e}")
         return None
 
 
@@ -169,14 +182,14 @@ def extract_file_content(file_path: str) -> str:
 # Prompt Builders
 # ---------------------------------------------------------------------------
 def generate_react_component_from_controller(
-    controller_content: str, dependencies: str
+    controller_content: str, dependencies: str, ast:dict
 ) -> str:
     """
     Converts an Angular controller to a React component using the LLM.
     """
     prompt = (
         "You are an expert JavaScript developer skilled at converting AngularJS components to ReactJS.\n"
-        "You'll be provided with an AngularJS controller and relevant dependencies.\n"
+        "You'll be provided with an AngularJS controller, relevant dependencies, and a parsed AST tree. \n"
         "Convert the following AngularJS controller to a functional React component that uses hooks.\n"
         "Follow these rules:\n"
         "1. Convert $scope properties to useState/useRef.\n"
@@ -196,6 +209,11 @@ def generate_react_component_from_controller(
         "AngularJS Controller:\n"
         "```javascript\n"
         f"{controller_content}\n"
+        "```\n"
+        "\n"
+         "Javascript AST:\n"
+        "```json\n"
+        f"{json.dumps(ast)}\n"
         "```\n"
         "\n"
         "Dependencies:\n"
@@ -235,9 +253,16 @@ def generate_react_component_from_html_template(template_content: str, file_path
         f"{template_content}\n"
         "```\n"
     )
-    return infer(prompt)
-
-
+    try:
+      response =  infer(prompt)
+      # Remove surrounding backticks if present
+      response = response.strip('`')
+      response = response.replace('```javascript','')
+      response = response.replace('```','')
+      return response
+    except Exception as e:
+      logging.error("error generating react component from html template: %s", e)
+      return None
 
 def convert_angular_module(module_content: str) -> str:
     """
@@ -258,6 +283,81 @@ def convert_angular_module(module_content: str) -> str:
         "```\n"
     )
     return infer(prompt)
+
+
+# ---------------------------------------------------------------------------
+# Feedback Loop Helper
+# ---------------------------------------------------------------------------
+
+def score_react_component(component_code: str) -> int:
+  """Scores the React component based on common mistakes"""
+  score = 0
+  if not component_code:
+    return 0 # no score if empty
+  
+  # common errors
+  if 'ng-show' in component_code:
+     score -=1
+  if 'ng-if' in component_code:
+     score -=1
+  if 'ng-repeat' in component_code:
+     score -=1
+  if 'ng-click' in component_code:
+    score -=1
+  if 'ng-model' in component_code:
+    score -=1
+  if '{{' in component_code:
+    score -=1
+  if 'className=' not in component_code:
+    score -=1
+
+  if 'useState(' in component_code:
+    score+=1
+
+  return score
+
+
+
+def improve_react_component(file_path: str, original_content: str, converted_code: str, iteration: int) -> str:
+  """Improves a react component via LLM feedback"""
+  prompt = (
+        "You are an expert JavaScript developer skilled at converting AngularJS to ReactJS.\n"
+        "You'll be provided with an original AngularJS HTML template, and the current converted ReactJS component. \n"
+        "You are to review the converted React component, identify any mistakes, fix them, and produce a perfect React conversion.\n"
+        "Follow these rules:\n"
+        "1.  Translate any Angular-specific directives (e.g., ng-show, ng-repeat, ng-if, ng-click, ng-model)\n"
+        "   to their React equivalents using React’s JSX syntax and React’s hooks (e.g., useState, conditional rendering, etc.).\n"
+         "2. Use JSX syntax.\n"
+        "3. Use descriptive class names.\n"
+        "4. Return a valid functional React component with necessary import statements, making sure that any state used is managed using hooks.\n"
+        "5. Convert Angular event handlers like ng-click into React’s onClick syntax, ensuring that events are handled correctly within the React Component.\n"
+        "6. Convert any binding like {{property}} to JSX syntax.  Make sure to handle both one-way and two-way binding.\n"
+        "7. All attributes must be valid React attributes.\n"
+        "8. Do not assume any particular styling library; use inline styles only if necessary.\n"
+         "9. Handle conditional rendering with JSX ternary operator or logical &&.\n"
+        "10. Use Fragments (<></>) when needed to avoid extra divs.\n"
+        "11. Output in ES6 JavaScript, not TypeScript.\n"
+        "12. If the HTML template is a gridCellTemplate, create a separate React component that can be used as a template, and then import it into the parent component using props.\n"
+        "13. If the HTML template contains a table, make sure the html table is rendered properly with proper headers and cells.  Use map if needed to dynamically render table rows.\n"
+        "14. If the file_path contains gridHeaderTemplate, then make sure to generate JSX for the table headers and not the whole table.\n"
+        "15. Analyze the React component, and fix any syntax errors, remove any extraneous code or comments, and remove any usage of Angular within the React component.\n"
+          "16. Only return the ReactJS component code, with all import statements.\n"
+        "\n"
+        f"Original AngularJS HTML Template:\n ```html\n{original_content}\n```"
+        f"\n\nCurrent React Component:\n ```javascript\n{converted_code}\n```"
+        f"\n\n Iteration {iteration} \n"
+    )
+  try:
+        response =  infer(prompt)
+        # Remove surrounding backticks if present
+        response = response.strip('`')
+        response = response.replace('```javascript','')
+        response = response.replace('```','')
+        return response
+  except Exception as e:
+    logging.error(f"error improving react component: {e}")
+    return converted_code
+
 
 
 # ---------------------------------------------------------------------------
@@ -282,25 +382,43 @@ def handle_html_file(
     record = get_conversion_status(file_path)
     if record and record[0] == "success" and not force:
         return
-
+    
     file_content = extract_file_content(file_path)
     if not file_content:
         update_conversion_status(file_path, "error", error_msg="empty or unreadable file")
         return
 
     try:
-        react_component_code = generate_react_component_from_html_template(file_content, file_path)
-        if react_component_code:
-            rel_path = os.path.relpath(file_path, source_dir)
-            output_file_path = os.path.join(
-                output_dir, rel_path.replace('.html', '.js')
-            )
-            write_converted_file(output_file_path, react_component_code)
-            update_conversion_status(file_path, "success",
-                                     output_file_path=output_file_path)
+        
+        converted_code = generate_react_component_from_html_template(file_content, file_path)
+        if not converted_code:
+            update_conversion_status(file_path, "error", error_msg="no initial code")
+            return
+        
+        
+        
+        # Improve via feedback loop
+        max_iterations = 5
+        score = score_react_component(converted_code)
+        iteration_count = 0
+        
+        while score < 0 and iteration_count < max_iterations:
+          iteration_count+=1
+          converted_code = improve_react_component(file_path, file_content, converted_code, iteration_count)
+          score = score_react_component(converted_code)
+        
+        
+        rel_path = os.path.relpath(file_path, source_dir)
+        output_file_path = os.path.join(
+            output_dir, rel_path.replace('.html', '.js')
+        )
+        write_converted_file(output_file_path, converted_code)
+        update_conversion_status(file_path, "success",
+                                  output_file_path=output_file_path, iteration_count = iteration_count)
     except Exception as exc:
         logging.error("Error processing HTML file %s: %s", file_path, exc)
         update_conversion_status(file_path, "error", error_msg=str(exc))
+
 
 def handle_angular_module_file(
     file_path: str, source_dir: str, output_dir: str,
@@ -344,23 +462,20 @@ def handle_angular_controller_file(
     record = get_conversion_status(file_path)
     if record and record[0] == "success" and not force:
         return
-
+    
     file_content = extract_file_content(file_path)
     if not file_content:
         update_conversion_status(file_path, "error", error_msg="empty or unreadable file")
         return
 
     try:
-        tree = parse_js(file_content)
-        dependencies = set()
-        if tree:
-            for node in ast.walk(tree):
-                if (isinstance(node, ast.Call) and
-                        isinstance(node.func, ast.Attribute) and
-                        node.func.attr == 'module'):
-                    for arg in node.args:
-                        if isinstance(arg, ast.Constant):
-                            dependencies.add(arg.value)
+        ast = parse_js(file_path)
+        if not ast:
+            update_conversion_status(file_path, "error", error_msg="ast is empty")
+            return
+        
+        dependencies = [dep['value'] for dep in ast.get('dependencies', [])]
+
 
         # Gather content from relevant modules
         dependency_files_content = ""
@@ -370,7 +485,7 @@ def handle_angular_controller_file(
 
         # Convert Angular controller
         react_component_code = generate_react_component_from_controller(
-            file_content, dependency_files_content
+            file_content, dependency_files_content, ast
         )
         if react_component_code:
             rel_path = os.path.relpath(file_path, source_dir)
