@@ -101,7 +101,7 @@ def infer(prompt: str) -> str:
                 print_error_and_exit(
                     f"Failed to get a valid response from {backend_name} after multiple attempts."
                 )
-            if "rate limit" in err_str.lower():
+            if "rate limit" in err_str.lower() or '429' in err_str.lower():
                 wait_time = 2 ** (attempt - 1)
                 logging.debug(
                     "[DEBUG] Rate limit encountered. Waiting %s seconds before retry...",
