@@ -21,6 +21,7 @@ import subprocess
 import sys
 import time
 import traceback
+from typing import Dict, Optional, Tuple
 
 from bs4 import BeautifulSoup
 from google import genai
@@ -32,7 +33,7 @@ from tqdm import tqdm
 # ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
+    format="%(asctime)s [%(levelname)s] %(message)s",
 )
 
 def print_error_and_exit(message: str) -> None:
@@ -43,9 +44,9 @@ def print_error_and_exit(message: str) -> None:
     sys.exit(1)
 
 gemini_key = os.environ.get("GEMINI_API_KEY")
-gemini_model_name = 'gemini-2.0-flash-exp'
+gemini_model_name = "gemini-2.0-flash-exp"
 openai_token = os.environ.get("OPENAI_API_TOKEN")
-openai_model_name = 'gpt-4o-mini'
+openai_model_name = "gpt-4o-mini"
 
 if not gemini_key and not openai_token:
     print_error_and_exit(
@@ -72,14 +73,15 @@ def infer(prompt: str) -> str:
 
     for attempt in range(1, MAX_RETRIES + 1):
         if attempt > 1:
-            logging.debug(f"[DEBUG] Attempt {attempt}/{MAX_RETRIES} to call {backend_name} API.")
+            logging.debug(
+                f"[DEBUG] Attempt {attempt}/{MAX_RETRIES} to call {backend_name} API."
+            )
 
         try:
             if use_gemini:
                 # Gemini backend
                 response = gemini_client.models.generate_content(
-                    model=gemini_model_name,
-                    contents=prompt.strip()
+                    model=gemini_model_name, contents=prompt.strip()
                 )
                 return response.text.strip()
             else:
@@ -93,13 +95,15 @@ def infer(prompt: str) -> str:
                     max_completion_tokens=2048,
                     top_p=1,
                     frequency_penalty=0,
-                    presence_penalty=0
+                    presence_penalty=0,
                 )
                 return completion.choices[0].message.content.strip()
 
         except Exception as e:
             err_str = str(e)
-            logging.debug(f"[DEBUG] {backend_name} API call attempt {attempt} failed: {err_str}")
+            logging.debug(
+                f"[DEBUG] {backend_name} API call attempt {attempt} failed: {err_str}"
+            )
             traceback.print_exc()
 
             if attempt == MAX_RETRIES:
@@ -110,7 +114,8 @@ def infer(prompt: str) -> str:
             if "rate limit" in err_str.lower():
                 wait_time = 2 ** (attempt - 1)
                 logging.debug(
-                    f"[DEBUG] Rate limit encountered. Waiting {wait_time} seconds before retry..."
+                    "[DEBUG] Rate limit encountered. Waiting %s seconds before retry...",
+                    wait_time,
                 )
                 time.sleep(wait_time)
 
@@ -124,16 +129,15 @@ def strip_code_fences(text: str) -> str:
     Strips out code fences (like ```jsx or ``` or ```javascript).
     """
     # Remove any lines starting with triple backticks and optional language spec
-    text = re.sub(r"```[\w-]*", '', text)
+    text = re.sub(r"```[\w-]*", "", text)
     # Remove any remaining triple backticks
-    text = re.sub(r"```", '', text)
+    text = re.sub(r"```", "", text)
     return text.strip()
 
 # ---------------------------------------------------------------------------
 # Database Utilities
 # ---------------------------------------------------------------------------
 db_name = "migration_state.db"
-
 
 def init_db() -> None:
     """
@@ -156,8 +160,7 @@ def init_db() -> None:
     finally:
         conn.close()
 
-
-def get_conversion_status(file_path: str):
+def get_conversion_status(file_path: str) -> Optional[Tuple[str, str, str, int]]:
     """
     Returns a tuple of (status, output_file_path, error_msg, iteration_count)
     for the given file_path, or None if it doesn't exist in the DB.
@@ -178,13 +181,12 @@ def get_conversion_status(file_path: str):
     finally:
         conn.close()
 
-
 def update_conversion_status(
     file_path: str,
     status: str,
-    output_file_path: str = None,
-    error_msg: str = None,
-    iteration_count: int = None
+    output_file_path: Optional[str] = None,
+    error_msg: Optional[str] = None,
+    iteration_count: Optional[int] = None,
 ) -> None:
     """
     Insert or update the conversion status for a given file_path, including iteration_count.
@@ -212,19 +214,18 @@ def update_conversion_status(
 # ---------------------------------------------------------------------------
 # Parsing / Conversion Helpers
 # ---------------------------------------------------------------------------
-def parse_html(html_content: str) -> BeautifulSoup:
+def parse_html(html_content: str) -> Optional[BeautifulSoup]:
     """
     Parses HTML content using BeautifulSoup.
     """
     try:
-        soup = BeautifulSoup(html_content, 'html.parser')
+        soup = BeautifulSoup(html_content, "html.parser")
         return soup
     except Exception as exc:
         logging.error("Error parsing HTML: %s", exc)
         return None
 
-
-def parse_js(js_filename: str) -> dict:
+def parse_js(js_filename: str) -> Dict:
     """
     Parses JavaScript content using esprima via subprocess.
     Assumes parse_js_esprima.js is in the same directory
@@ -235,14 +236,13 @@ def parse_js(js_filename: str) -> dict:
             ["node", "parse_js_esprima.js", js_filename],
             capture_output=True,
             text=True,
-            check=True
+            check=True,
         )
         if result.returncode == 0:
             return json.loads(result.stdout)
         else:
             logging.error(
-                "Error parsing JavaScript with esprima. Stderr: %s",
-                result.stderr
+                "Error parsing JavaScript with esprima. Stderr: %s", result.stderr
             )
             return {}
     except FileNotFoundError:
@@ -254,20 +254,18 @@ def parse_js(js_filename: str) -> dict:
         logging.error("Error parsing JavaScript %s: %s", js_filename, exc)
         return {}
 
-
 def is_angular_module_file(file_path: str) -> bool:
     """
     Simple check for Angular module files, e.g., ends with '-module.js'.
     """
-    return file_path.endswith('-module.js')
-
+    return file_path.endswith("-module.js")
 
 def extract_file_content(file_path: str) -> str:
     """
     Reads a file from disk and returns its contents as a string.
     """
     try:
-        with open(file_path, 'r', encoding='utf-8') as file_obj:
+        with open(file_path, "r", encoding="utf-8") as file_obj:
             return file_obj.read()
     except Exception as exc:
         logging.error("Error reading file %s: %s", file_path, exc)
@@ -277,9 +275,7 @@ def extract_file_content(file_path: str) -> str:
 # Prompt Builders
 # ---------------------------------------------------------------------------
 def generate_react_component_from_controller(
-    controller_content: str,
-    dependencies: str,
-    ast: dict
+    controller_content: str, dependencies: str, ast: Dict
 ) -> str:
     """
     Converts an AngularJS controller to a React component using the LLM.
@@ -316,10 +312,8 @@ def generate_react_component_from_controller(
     response = infer(prompt)
     return strip_code_fences(response)
 
-
 def generate_react_component_from_html_template(
-    template_content: str,
-    file_path: str
+    template_content: str, file_path: str
 ) -> str:
     """
     Converts an AngularJS HTML template to a React component using the LLM.
@@ -352,7 +346,6 @@ def generate_react_component_from_html_template(
     )
     response = infer(prompt)
     return strip_code_fences(response)
-
 
 def convert_angular_module(module_content: str) -> str:
     """
@@ -388,36 +381,32 @@ def score_react_component(component_code: str) -> int:
 
     score = 0
     # Penalize leftover AngularJS directives
-    if 'ng-show' in component_code:
+    if "ng-show" in component_code:
         score -= 1
-    if 'ng-if' in component_code:
+    if "ng-if" in component_code:
         score -= 1
-    if 'ng-repeat' in component_code:
+    if "ng-repeat" in component_code:
         score -= 1
-    if 'ng-click' in component_code:
+    if "ng-click" in component_code:
         score -= 1
-    if 'ng-model' in component_code:
+    if "ng-model" in component_code:
         score -= 1
-    if '{{' in component_code:
+    if "{{" in component_code:
         score -= 1
 
     # If using React standard, we expect className for styling
     # If we don't see it, penalize
-    if 'className=' not in component_code:
+    if "className=" not in component_code:
         score -= 1
 
     # If we see at least one useState, reward a point
-    if 'useState(' in component_code:
+    if "useState(" in component_code:
         score += 1
 
     return score
 
-
 def improve_react_component(
-    file_path: str,
-    original_content: str,
-    converted_code: str,
-    iteration_count: int
+    file_path: str, original_content: str, converted_code: str, iteration_count: int
 ) -> str:
     """
     Improves a React component via a feedback loop with the LLM prompt.
@@ -468,15 +457,11 @@ def write_converted_file(output_file_path: str, content: str) -> None:
     """
     output_dir = os.path.dirname(output_file_path)
     os.makedirs(output_dir, exist_ok=True)
-    with open(output_file_path, 'w', encoding='utf-8') as f_out:
+    with open(output_file_path, "w", encoding="utf-8") as f_out:
         f_out.write(content)
 
-
 def handle_html_file(
-    file_path: str,
-    source_dir: str,
-    output_dir: str,
-    force: bool
+    file_path: str, source_dir: str, output_dir: str, force: bool
 ) -> None:
     """
     Handles conversion of HTML files to React components.
@@ -489,14 +474,14 @@ def handle_html_file(
     file_content = extract_file_content(file_path)
     if not file_content:
         update_conversion_status(
-            file_path,
-            "error",
-            error_msg="empty or unreadable file"
+            file_path, "error", error_msg="empty or unreadable file"
         )
         return
 
     try:
-        converted_code = generate_react_component_from_html_template(file_content, file_path)
+        converted_code = generate_react_component_from_html_template(
+            file_content, file_path
+        )
         if not converted_code:
             update_conversion_status(file_path, "error", error_msg="no initial code")
             return
@@ -509,17 +494,13 @@ def handle_html_file(
         while score < 0 and iteration_count < max_iterations:
             iteration_count += 1
             converted_code = improve_react_component(
-                file_path,
-                file_content,
-                converted_code,
-                iteration_count
+                file_path, file_content, converted_code, iteration_count
             )
             score = score_react_component(converted_code)
 
         rel_path = os.path.relpath(file_path, source_dir)
         output_file_path = os.path.join(
-            output_dir,
-            rel_path.replace('.html', '.js')
+            output_dir, rel_path.replace(".html", ".js")
         )
         write_converted_file(output_file_path, converted_code)
 
@@ -527,20 +508,19 @@ def handle_html_file(
             file_path,
             "success",
             output_file_path=output_file_path,
-            iteration_count=iteration_count
+            iteration_count=iteration_count,
         )
 
     except Exception as exc:
         logging.error("Error processing HTML file %s: %s", file_path, exc)
         update_conversion_status(file_path, "error", error_msg=str(exc))
 
-
 def handle_angular_module_file(
     file_path: str,
     source_dir: str,
     output_dir: str,
-    angular_modules: dict,
-    force: bool
+    angular_modules: Dict[str, str],
+    force: bool,
 ) -> None:
     """
     Handles conversion of Angular module files to React equivalents.
@@ -552,9 +532,7 @@ def handle_angular_module_file(
     file_content = extract_file_content(file_path)
     if not file_content:
         update_conversion_status(
-            file_path,
-            "error",
-            error_msg="empty or unreadable file"
+            file_path, "error", error_msg="empty or unreadable file"
         )
         return
 
@@ -566,26 +544,23 @@ def handle_angular_module_file(
             write_converted_file(output_file_path, react_module_code)
 
             update_conversion_status(
-                file_path,
-                "success",
-                output_file_path=output_file_path
+                file_path, "success", output_file_path=output_file_path
             )
 
             # Store the original module content for potential dependencies
-            module_name = os.path.basename(file_path).replace('-module.js', '')
+            module_name = os.path.basename(file_path).replace("-module.js", "")
             angular_modules[module_name] = file_content
 
     except Exception as exc:
         logging.error("Error processing module file %s: %s", file_path, exc)
         update_conversion_status(file_path, "error", error_msg=str(exc))
 
-
 def handle_angular_controller_file(
     file_path: str,
     source_dir: str,
     output_dir: str,
-    angular_modules: dict,
-    force: bool
+    angular_modules: Dict[str, str],
+    force: bool,
 ) -> None:
     """
     Handles conversion of Angular controller files to React components.
@@ -597,9 +572,7 @@ def handle_angular_controller_file(
     file_content = extract_file_content(file_path)
     if not file_content:
         update_conversion_status(
-            file_path,
-            "error",
-            error_msg="empty or unreadable file"
+            file_path, "error", error_msg="empty or unreadable file"
         )
         return
 
@@ -610,8 +583,7 @@ def handle_angular_controller_file(
             return
 
         dependencies = [
-            dep['value'] for dep in ast.get('dependencies', [])
-            if 'value' in dep
+            dep["value"] for dep in ast.get("dependencies", []) if "value" in dep
         ]
 
         # Gather content from relevant modules
@@ -621,9 +593,7 @@ def handle_angular_controller_file(
                 dependency_files_content += angular_modules[dep] + "\n"
 
         react_component_code = generate_react_component_from_controller(
-            file_content,
-            dependency_files_content,
-            ast
+            file_content, dependency_files_content, ast
         )
         if react_component_code:
             rel_path = os.path.relpath(file_path, source_dir)
@@ -631,21 +601,15 @@ def handle_angular_controller_file(
             write_converted_file(output_file_path, react_component_code)
 
             update_conversion_status(
-                file_path,
-                "success",
-                output_file_path=output_file_path
+                file_path, "success", output_file_path=output_file_path
             )
 
     except Exception as exc:
         logging.error("Error processing controller file %s: %s", file_path, exc)
         update_conversion_status(file_path, "error", error_msg=str(exc))
 
-
 def handle_generic_js_file(
-    file_path: str,
-    source_dir: str,
-    output_dir: str,
-    force: bool
+    file_path: str, source_dir: str, output_dir: str, force: bool
 ) -> None:
     """
     Handles copying over generic JS files that don't match Angular patterns.
@@ -657,9 +621,7 @@ def handle_generic_js_file(
     file_content = extract_file_content(file_path)
     if not file_content:
         update_conversion_status(
-            file_path,
-            "error",
-            error_msg="empty or unreadable file"
+            file_path, "error", error_msg="empty or unreadable file"
         )
         return
 
@@ -670,20 +632,14 @@ def handle_generic_js_file(
         write_converted_file(output_file_path, file_content)
 
         update_conversion_status(
-            file_path,
-            "success",
-            output_file_path=output_file_path
+            file_path, "success", output_file_path=output_file_path
         )
     except Exception as exc:
         logging.error("Error processing generic JS file %s: %s", file_path, exc)
         update_conversion_status(file_path, "error", error_msg=str(exc))
 
-
 def handle_other_file(
-    file_path: str,
-    source_dir: str,
-    output_dir: str,
-    force: bool
+    file_path: str, source_dir: str, output_dir: str, force: bool
 ) -> None:
     """
     Handles copying over other file types unchanged.
@@ -695,9 +651,7 @@ def handle_other_file(
     file_content = extract_file_content(file_path)
     if not file_content:
         update_conversion_status(
-            file_path,
-            "error",
-            error_msg="empty or unreadable file"
+            file_path, "error", error_msg="empty or unreadable file"
         )
         return
 
@@ -708,9 +662,7 @@ def handle_other_file(
         write_converted_file(output_file_path, file_content)
 
         update_conversion_status(
-            file_path,
-            "success",
-            output_file_path=output_file_path
+            file_path, "success", output_file_path=output_file_path
         )
     except Exception as exc:
         logging.error("Error processing file %s: %s", file_path, exc)
@@ -720,21 +672,21 @@ def process_file(
     file_path: str,
     source_dir: str,
     output_dir: str,
-    angular_modules: dict,
-    force: bool = False
+    angular_modules: Dict[str, str],
+    force: bool = False,
 ) -> None:
     """
     Routes files to the correct handler based on file extension
     and Angular usage.
     """
-    if file_path.endswith('.html'):
+    if file_path.endswith(".html"):
         handle_html_file(file_path, source_dir, output_dir, force)
-    elif file_path.endswith('.js'):
+    elif file_path.endswith(".js"):
         if is_angular_module_file(file_path):
             handle_angular_module_file(
                 file_path, source_dir, output_dir, angular_modules, force
             )
-        elif 'controller' in file_path.lower():
+        elif "controller" in file_path.lower():
             handle_angular_controller_file(
                 file_path, source_dir, output_dir, angular_modules, force
             )
@@ -751,17 +703,17 @@ def main():
     parser.add_argument(
         "--source_dir",
         required=True,
-        help="Path to the source directory containing AngularJS code."
+        help="Path to the source directory containing AngularJS code.",
     )
     parser.add_argument(
         "--output_dir",
         required=True,
-        help="Path to the output directory for React code."
+        help="Path to the output directory for React code.",
     )
     parser.add_argument(
         "--force",
         help="Force re-conversion even if the file is already marked 'success'.",
-        action="store_true"
+        action="store_true",
     )
     args = parser.parse_args()
 
@@ -769,7 +721,7 @@ def main():
     init_db()
 
     # 2. Prepare to store Angular modules
-    angular_modules = {}
+    angular_modules: Dict[str, str] = {}
 
     # 3. Gather all .html and .js files from the source directory
     file_paths = []
@@ -777,7 +729,7 @@ def main():
         for file_name in files:
             full_path = os.path.join(root, file_name)
             # Skip DB file or the script itself if present
-            if full_path.endswith('.html') or full_path.endswith('.js'):
+            if full_path.endswith(".html") or full_path.endswith(".js"):
                 file_paths.append(full_path)
 
     # 4. Process each file with a progress bar
@@ -788,12 +740,11 @@ def main():
             args.source_dir,
             args.output_dir,
             angular_modules,
-            force=args.force
+            force=args.force,
         )
 
     # 5. Done
     logging.info("Conversion complete. See '%s' for details.", db_name)
-
 
 if __name__ == "__main__":
     main()
