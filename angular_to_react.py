@@ -15,6 +15,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -34,7 +35,6 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s"
 )
 
-
 def print_error_and_exit(message: str) -> None:
     """
     Prints an error message and exits the script.
@@ -42,14 +42,11 @@ def print_error_and_exit(message: str) -> None:
     print(f"Error: {message}")
     sys.exit(1)
 
-
-# Gather environment variables
 gemini_key = os.environ.get("GEMINI_API_KEY")
 gemini_model_name = 'gemini-2.0-flash-exp'
 openai_token = os.environ.get("OPENAI_API_TOKEN")
 openai_model_name = 'gpt-4o-mini'
 
-# Fail fast if no credentials
 if not gemini_key and not openai_token:
     print_error_and_exit(
         "Neither GEMINI_API_KEY nor OPENAI_API_TOKEN is set. "
@@ -60,33 +57,33 @@ use_gemini = bool(gemini_key)
 if use_gemini:
     gemini_client = genai.Client(api_key=gemini_key)
 
-
 # ---------------------------------------------------------------------------
 # LLM Infer Function
 # ---------------------------------------------------------------------------
 MAX_RETRIES = 10
 
-
 def infer(prompt: str) -> str:
     """
     Calls an LLM backend (Gemini or OpenAI) to get a response.
     Retries on transient errors (e.g., rate limits).
+    Returns the LLM text output only.
     """
     backend_name = "Gemini" if use_gemini else "OpenAI"
 
     for attempt in range(1, MAX_RETRIES + 1):
         if attempt > 1:
-            print(f"[DEBUG] Attempt {attempt}/{MAX_RETRIES} to call {backend_name} API.")
+            logging.debug(f"[DEBUG] Attempt {attempt}/{MAX_RETRIES} to call {backend_name} API.")
 
         try:
             if use_gemini:
+                # Gemini backend
                 response = gemini_client.models.generate_content(
                     model=gemini_model_name,
                     contents=prompt.strip()
                 )
                 return response.text.strip()
-
             else:
+                # OpenAI backend
                 client = OpenAI(api_key=openai_token)
                 completion = client.chat.completions.create(
                     model=openai_model_name,
@@ -102,7 +99,7 @@ def infer(prompt: str) -> str:
 
         except Exception as e:
             err_str = str(e)
-            print(f"[DEBUG] {backend_name} API call attempt {attempt} failed: {err_str}")
+            logging.debug(f"[DEBUG] {backend_name} API call attempt {attempt} failed: {err_str}")
             traceback.print_exc()
 
             if attempt == MAX_RETRIES:
@@ -110,15 +107,27 @@ def infer(prompt: str) -> str:
                     f"Failed to get a valid response from {backend_name} after multiple attempts."
                 )
 
-            # If rate-limited, exponential backoff
             if "rate limit" in err_str.lower():
                 wait_time = 2 ** (attempt - 1)
-                print(f"[DEBUG] Rate limit encountered. Waiting {wait_time} seconds before retry...")
+                logging.debug(
+                    f"[DEBUG] Rate limit encountered. Waiting {wait_time} seconds before retry..."
+                )
                 time.sleep(wait_time)
 
-    # Should not normally get here
     return ""
 
+# ---------------------------------------------------------------------------
+# Remove Code Fences
+# ---------------------------------------------------------------------------
+def strip_code_fences(text: str) -> str:
+    """
+    Strips out code fences (like ```jsx or ``` or ```javascript).
+    """
+    # Remove any lines starting with triple backticks and optional language spec
+    text = re.sub(r"```[\w-]*", '', text)
+    # Remove any remaining triple backticks
+    text = re.sub(r"```", '', text)
+    return text.strip()
 
 # ---------------------------------------------------------------------------
 # Database Utilities
@@ -200,7 +209,6 @@ def update_conversion_status(
     finally:
         conn.close()
 
-
 # ---------------------------------------------------------------------------
 # Parsing / Conversion Helpers
 # ---------------------------------------------------------------------------
@@ -265,7 +273,6 @@ def extract_file_content(file_path: str) -> str:
         logging.error("Error reading file %s: %s", file_path, exc)
         return ""
 
-
 # ---------------------------------------------------------------------------
 # Prompt Builders
 # ---------------------------------------------------------------------------
@@ -276,6 +283,7 @@ def generate_react_component_from_controller(
 ) -> str:
     """
     Converts an AngularJS controller to a React component using the LLM.
+    Returns ONLY the LLM's result (the React code).
     """
     prompt = (
         "You are an expert JavaScript developer skilled at converting "
@@ -305,7 +313,8 @@ def generate_react_component_from_controller(
         "Dependencies:\n"
         f"```javascript\n{dependencies}\n```\n"
     )
-    return infer(prompt)
+    response = infer(prompt)
+    return strip_code_fences(response)
 
 
 def generate_react_component_from_html_template(
@@ -314,6 +323,7 @@ def generate_react_component_from_html_template(
 ) -> str:
     """
     Converts an AngularJS HTML template to a React component using the LLM.
+    Returns ONLY the LLM's result (the React code).
     """
     prompt = (
         "You are an expert JavaScript developer skilled at converting AngularJS "
@@ -340,12 +350,14 @@ def generate_react_component_from_html_template(
         "HTML Template:\n"
         f"```html\n{template_content}\n```\n"
     )
-    return infer(prompt)
+    response = infer(prompt)
+    return strip_code_fences(response)
 
 
 def convert_angular_module(module_content: str) -> str:
     """
     Converts an AngularJS module to a React equivalent or plain JS file using the LLM.
+    Returns ONLY the LLM's result (the React code).
     """
     prompt = (
         "You are an expert JavaScript developer skilled at converting AngularJS modules "
@@ -360,8 +372,8 @@ def convert_angular_module(module_content: str) -> str:
         "AngularJS Module:\n"
         f"```javascript\n{module_content}\n```\n"
     )
-    return infer(prompt)
-
+    response = infer(prompt)
+    return strip_code_fences(response)
 
 # ---------------------------------------------------------------------------
 # Feedback Loop Helpers
@@ -411,6 +423,7 @@ def improve_react_component(
     Improves a React component via a feedback loop with the LLM prompt.
     Looks at the existing converted code, compares with the original HTML,
     and tries to remove leftover Angular artifacts.
+    Returns ONLY the improved React code.
     """
     prompt = (
         "You are an expert JavaScript developer skilled at converting AngularJS to ReactJS.\n"
@@ -441,15 +454,10 @@ def improve_react_component(
 
     try:
         response = infer(prompt)
-        # Remove possible code fences from the LLM response
-        response = response.strip('`')
-        response = response.replace('```javascript', '')
-        response = response.replace('```', '')
-        return response
+        return strip_code_fences(response)
     except Exception as e:
         logging.error("Error improving react component: %s", e)
         return converted_code
-
 
 # ---------------------------------------------------------------------------
 # Main Processing Logic
@@ -612,7 +620,6 @@ def handle_angular_controller_file(
             if dep in angular_modules:
                 dependency_files_content += angular_modules[dep] + "\n"
 
-        # Convert Angular controller
         react_component_code = generate_react_component_from_controller(
             file_content,
             dependency_files_content,
@@ -659,6 +666,7 @@ def handle_generic_js_file(
     try:
         rel_path = os.path.relpath(file_path, source_dir)
         output_file_path = os.path.join(output_dir, rel_path)
+        # Just copy the original. Not run through LLM.
         write_converted_file(output_file_path, file_content)
 
         update_conversion_status(
@@ -666,7 +674,6 @@ def handle_generic_js_file(
             "success",
             output_file_path=output_file_path
         )
-
     except Exception as exc:
         logging.error("Error processing generic JS file %s: %s", file_path, exc)
         update_conversion_status(file_path, "error", error_msg=str(exc))
@@ -697,6 +704,7 @@ def handle_other_file(
     try:
         rel_path = os.path.relpath(file_path, source_dir)
         output_file_path = os.path.join(output_dir, rel_path)
+        # Just copy the original.
         write_converted_file(output_file_path, file_content)
 
         update_conversion_status(
@@ -704,11 +712,9 @@ def handle_other_file(
             "success",
             output_file_path=output_file_path
         )
-
     except Exception as exc:
         logging.error("Error processing file %s: %s", file_path, exc)
         update_conversion_status(file_path, "error", error_msg=str(exc))
-
 
 def process_file(
     file_path: str,
@@ -721,31 +727,21 @@ def process_file(
     Routes files to the correct handler based on file extension
     and Angular usage.
     """
-    # Decide how to handle each file
     if file_path.endswith('.html'):
         handle_html_file(file_path, source_dir, output_dir, force)
     elif file_path.endswith('.js'):
         if is_angular_module_file(file_path):
             handle_angular_module_file(
-                file_path,
-                source_dir,
-                output_dir,
-                angular_modules,
-                force
+                file_path, source_dir, output_dir, angular_modules, force
             )
         elif 'controller' in file_path.lower():
             handle_angular_controller_file(
-                file_path,
-                source_dir,
-                output_dir,
-                angular_modules,
-                force
+                file_path, source_dir, output_dir, angular_modules, force
             )
         else:
             handle_generic_js_file(file_path, source_dir, output_dir, force)
     else:
         handle_other_file(file_path, source_dir, output_dir, force)
-
 
 # ---------------------------------------------------------------------------
 # Main Entry Point
@@ -780,7 +776,7 @@ def main():
     for root, _, files in os.walk(args.source_dir):
         for file_name in files:
             full_path = os.path.join(root, file_name)
-            # Skip the DB file and skip any references to this script itself, if present
+            # Skip DB file or the script itself if present
             if full_path.endswith('.html') or full_path.endswith('.js'):
                 file_paths.append(full_path)
 
