@@ -1,115 +1,113 @@
 #!/usr/bin/env python3
-
 """
-A script to automatically convert a legacy Java application into a modern Python web application
-and then perform iterative review/fix passes to close gaps in HTTP endpoints, database schemas,
-and business logic.
+A script to parse a legacy Java application and faithfully convert it into
+a modern Python FastAPI application using SQLAlchemy, Alembic, and Pytest.
+
+Key Points:
+1. We parse the .java files using javalang to build an intermediate representation (IR).
+2. We gather the entire raw .java code as well, so the LLM has both structural and textual info.
+3. We feed the IR + raw code to the LLM, asking it to produce a *complete* Python codebase.
+4. We carefully split files from the LLM output and write them to the specified output directory.
+5. We keep the final code as simple and PEP8-compliant as possible.
 
 Usage:
     python convert_app.py <input_directory> <output_directory>
 
 Environment Variables:
-    OPENAI_API_KEY: Your OpenAI API key. (Required to use the OpenAI LLM pass)
-    GEMINI_API_KEY: Your Google PaLM API key. (Used if OPENAI_API_KEY is not set)
+    OPENAI_API_KEY: (optional) Your OpenAI API key if you want to call the OpenAI Chat API.
+    GEMINI_API_KEY: (optional) Your Google PaLM (Gemini) API key if you want to call PaLM instead.
+                    If both keys are present, we'll default to OpenAI for now.
 
 Requirements:
-    pip install openai google-generativeai
+    pip install openai google-generativeai javalang
 """
 
 import os
 import sys
 import re
 import time
-from typing import List, Dict
+from typing import List, Dict, Any
+import javalang  # pip install javalang
 import google.generativeai as genai
 from openai import OpenAI
 
-# -------------------------------------------------------------------------
+# ----------------------------------------------------------------------
 # LLM / Model Config
-# -------------------------------------------------------------------------
-OPENAI_MODEL = "o1-preview"
-GEMINI_MODEL = 'gemini-2.0-flash-exp'
+# ----------------------------------------------------------------------
+OPENAI_MODEL = "gpt-4"  # Or "o1-preview", or any model you prefer
+GEMINI_MODEL = "gemini-2.0-bison"  # Example
 
 openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
-genai.configure(api_key=os.environ.get('GEMINI_API_KEY', ''))
+genai.configure(api_key=os.environ.get("GEMINI_API_KEY", ""))
 gemini_model = genai.GenerativeModel(model_name=GEMINI_MODEL)
 
-# -------------------------------------------------------------------------
+# ----------------------------------------------------------------------
 # Prompts
-# -------------------------------------------------------------------------
+# ----------------------------------------------------------------------
 
-# High-level system instructions for converting Java -> Python
-INTRO_PROMPT = """You are a world-class expert in converting legacy Java codebases to modern Python web backends using FastAPI, SQLAlchemy, and Alembic for migrations.
-You also produce comprehensive unit tests using pytest, and ensure that all code is fully documented, idiomatic, and clean.
-You use Python best practices, type hints, and docstrings in Google style.
+SYSTEM_PROMPT = """You are a world-class software engineer with deep expertise in both Java and Python.
+You convert Java code (including classes, methods, fields, annotations, logic, etc.) to Python,
+ensuring no important details are lost.
 
-You will be given a list of files from a legacy Java codebase and asked to:
-1. Convert these files into a single coherent Python FastAPI application using SQLAlchemy models and Alembic migrations.
-2. Ensure that the application structure follows a modern, well-organized layout:
-    - `app/` directory containing `main.py` (FastAPI startup), `models.py` (SQLAlchemy models), `schemas.py` (Pydantic schemas), `routers/`, etc.
-    - `tests/` directory containing pytest-based tests for all major components.
-    - `alembic/` directory for migrations.
-3. Port logic from Java classes (controllers, services, DAOs, entities, etc.) into Python equivalents with proper layering.
-4. Update and improve comments, docstrings, and overall code clarity.
-5. Generate a requirements.txt or pyproject.toml if needed.
-6. Add Alembic migrations as needed.
-7. Provide a comprehensive pytest test file that covers key aspects of the application.
-8. At the end, produce a directory structure with all the needed Python files plus a summary of changes and improvements.
+You produce Python applications using:
+- FastAPI for web endpoints
+- SQLAlchemy for ORM
+- Alembic for migrations
+- Pytest for tests
+- PEP8 and best-practice architecture
 
-Follow best practices strictly. Utilize Python 3.9+ features and type hints.
+All code must be as close as possible in functionality to the Java source. If there's unclear Java logic, 
+comment it in Python for clarity. Preserve and translate inline comments where relevant. 
+Use Python type hints, docstrings, and be as idiomatic as possible without losing the Java logic.
 """
 
-# Template for transforming Java -> Python
-TRANSFORM_PROMPT_TEMPLATE = """You are given a set of Java source files and their contents. You have already read the instructions above.
-Now, analyze the provided files and produce a modern Python FastAPI application as described.
+USER_PROMPT_TEMPLATE = """Below is an intermediate representation (IR) of the entire Java codebase 
+(parsed with javalang) and, following that, the *raw text* of each .java file.
 
-Below are the Java files:
+Your goal:
+1. Faithfully convert *all* logic, data structures, classes, methods, and usage into a single coherent 
+   Python application using FastAPI, SQLAlchemy, Alembic, and Pytest.
+2. Use a recommended file structure:
+    app/
+       main.py
+       models.py
+       schemas.py
+       routers/
+         ... (one file per major route/controller)
+       ...
+    tests/
+       test_*.py
+    alembic/
+       versions/
+       env.py (or equivalent)
+    requirements.txt (or pyproject.toml)
+    README.md
+3. Avoid skipping or omitting code. If certain Java classes are not obviously connected, 
+   still convert them as separate modules or routers.
+4. Keep the code no more complex than necessary, but do not lose logic. 
+5. The final output must be *all* necessary files, separated by the format:
+   # filename: relative/path/to/file.py
+   <contents>
 
-{file_list}
+First, here is the IR (JSON-like structure you can read) summarizing the Java project:
+{ir}
 
-Step-by-step, do the following:
-1. Understand the domain model from the Java files.
-2. Identify all entities, services, and controllers.
-3. Devise a Python module structure (app/main.py, app/models.py, app/schemas.py, app/routers/*, etc.).
-4. Convert Java entities to SQLAlchemy models and Alembic migrations.
-5. Convert Java controllers to FastAPI routers.
-6. Convert services and utilities into Python modules and classes.
-7. Create Pydantic schemas for request/response models.
-8. Write a sample Alembic migration script based on the discovered models.
-9. Generate unit tests using pytest in a `tests/` directory.
-10. Include docstrings and comments that explain what the code does. Be clear and Pythonic.
-11. Generate a requirements.txt or pyproject.toml file including necessary dependencies.
-12. Finally, provide a structured output with all the resulting files as a directory tree and their contents.
+Next, here is the entire raw Java code (with file markers):
+{raw_java_sources}
 
-Make sure the resulting code is self-contained, understandable, and runs as a standalone Python application once dependencies are installed and Alembic migrations are applied.
+Please now produce the final Python codebase, ensuring everything is included.
+Do not skip anything.
 """
 
-# Prompt for iterative passes that look for missing or incorrect pieces
-REVIEW_PROMPT_TEMPLATE = """You are given the Python code for a newly migrated application.
-Now, carefully review and improve it with respect to potential gaps or mistakes in:
-1. Missing or incorrect {category}.
-
-Provide updated files if anything requires changing or adding.
-Follow best practices in FastAPI, SQLAlchemy, migrations, and business logic.
-If something is already correct, keep it as is.
-
-Output your revised code using the pattern:
-# filename: ...
-<code here>
-
-Include only the updated or new content for each file. If a file needs no changes, provide it anyway for completeness.
-"""
-
-
-# -------------------------------------------------------------------------
+# ----------------------------------------------------------------------
 # LLM Utility Functions
-# -------------------------------------------------------------------------
+# ----------------------------------------------------------------------
+
 def call_llm_system_user(system_prompt: str, user_prompt: str, temperature=0.0, max_tokens=8000) -> str:
     """
     Calls the LLM with a system prompt and a user prompt using OpenAI if available,
-    otherwise uses Gemini.
+    otherwise uses Gemini. Returns the LLM response text.
     """
-    # If we have an OpenAI key, use OpenAI
     if openai_client.api_key:
         messages = [
             {"role": "system", "content": system_prompt},
@@ -117,17 +115,13 @@ def call_llm_system_user(system_prompt: str, user_prompt: str, temperature=0.0, 
         ]
         return call_openai_chat_completion(messages, temperature=temperature, max_tokens=max_tokens)
     else:
-        # Otherwise, fallback to Gemini PaLM
         combined_prompt = f"{system_prompt}\n\n{user_prompt}"
-        return call_gemini(combined_prompt)
+        return call_gemini(combined_prompt, temperature=temperature)
 
-
-def call_openai_chat_completion(
-    messages: List[Dict[str, str]], temperature: float = 0.0, max_tokens: int = 8000
-) -> str:
-    """Call the OpenAI Chat API and return the response content."""
+def call_openai_chat_completion(messages: List[Dict[str, str]], temperature: float, max_tokens: int) -> str:
+    """Call the OpenAI Chat API (gpt-4 or similar) and return the response content."""
     if not openai_client.api_key:
-        raise ValueError("OPENAI_API_KEY environment variable not set.")
+        raise ValueError("OPENAI_API_KEY environment variable not set or is empty.")
 
     print("[INFO] Contacting OpenAI Chat Completion API... Please wait.")
     response = openai_client.chat.completions.create(
@@ -138,8 +132,7 @@ def call_openai_chat_completion(
     )
     return response.choices[0].message.content
 
-
-def call_gemini(prompt):
+def call_gemini(prompt: str, temperature=0.0) -> str:
     """Call the Gemini (Google PaLM) API for generation."""
     max_retries = 15
     retry_delay = 1  # Start with 1-second delay
@@ -151,7 +144,7 @@ def call_gemini(prompt):
                 prompt,
                 generation_config=genai.types.GenerationConfig(
                     candidate_count=1,
-                    temperature=0.8,
+                    temperature=temperature,
                 ),
                 stream=True,
             )
@@ -167,45 +160,187 @@ def call_gemini(prompt):
     print("[ERROR] Failed to get a valid response from Google PaLM API.")
     return ""
 
-# -------------------------------------------------------------------------
-# File Handling Utilities
-# -------------------------------------------------------------------------
+# ----------------------------------------------------------------------
+# Java Parsing / IR Construction
+# ----------------------------------------------------------------------
 
-
-def gather_java_files_content(start_path: str) -> str:
+def parse_java_files(input_dir: str) -> Dict[str, Any]:
     """
-    Recursively walks the input directory, reading the contents of each .java file
-    and returning them in a single string, separated by markers indicating filename.
+    Parse all .java files using javalang, building an intermediate representation.
+
+    Returns a dictionary of:
+    {
+      "files": [
+        {
+          "filename": "Relative path",
+          "classes": [
+             {
+               "name": str,
+               "extends": str or None,
+               "implements": [...],
+               "methods": [
+                  {
+                     "name": str,
+                     "params": [...],
+                     "return_type": str or None,
+                     "is_static": bool,
+                     "is_abstract": bool,
+                     "annotations": [...],
+                     "body_lines": (optional) int or snippet
+                  },
+                  ...
+               ],
+               "fields": [...],
+               "annotations": [...]
+             },
+             ...
+          ]
+        },
+        ...
+      ]
+    }
     """
-    java_files_content = []
-    for root, dirs, files in os.walk(start_path):
-        for filename in files:
-            if filename.endswith(".java"):
-                full_path = os.path.join(root, filename)
-                with open(full_path, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                rel_path = os.path.relpath(full_path, start_path)
-                java_files_content.append(f"# filename: {rel_path}\n{content}\n\n")
-    return "".join(java_files_content)
+    ir = {"files": []}
+
+    for root, dirs, files in os.walk(input_dir):
+        for f in files:
+            if f.endswith(".java"):
+                full_path = os.path.join(root, f)
+                rel_path = os.path.relpath(full_path, input_dir)
+                with open(full_path, "r", encoding="utf-8") as src_file:
+                    src = src_file.read()
+
+                try:
+                    tree = javalang.parse.parse(src)
+                except javalang.parser.JavaSyntaxError as e:
+                    print(f"[WARN] Java syntax error in {rel_path}: {e}. Will store partial parse info.")
+                    # Attempt partial parse or store minimal IR
+                    # We'll just skip deeper parse but store raw text in IR
+                    ir["files"].append({
+                        "filename": rel_path,
+                        "error": str(e),
+                        "classes": [],
+                    })
+                    continue
+
+                file_ir = {
+                    "filename": rel_path,
+                    "classes": []
+                }
+
+                # For top-level types in this file
+                for t in tree.types:
+                    if isinstance(t, javalang.tree.ClassDeclaration) or isinstance(t, javalang.tree.EnumDeclaration):
+                        class_info = {
+                            "name": t.name,
+                            "extends": str(t.extends.name) if t.extends else None,
+                            "implements": [i.name for i in t.implements] if t.implements else [],
+                            "annotations": [a.name for a in t.annotations] if t.annotations else [],
+                            "fields": [],
+                            "methods": [],
+                            "type": "enum" if isinstance(t, javalang.tree.EnumDeclaration) else "class"
+                        }
+
+                        # Fields
+                        for field in t.fields:
+                            # field.declarators might be multiple variables in one statement
+                            for decl in field.declarators:
+                                field_info = {
+                                    "name": decl.name,
+                                    "type": str(field.type) if field.type else None,
+                                    "annotations": [a.name for a in field.annotations] if field.annotations else [],
+                                }
+                                class_info["fields"].append(field_info)
+
+                        # Methods
+                        for method in t.methods:
+                            method_info = {
+                                "name": method.name,
+                                "params": [
+                                    {
+                                        "name": p.name,
+                                        "type": str(p.type.name) if p.type else None,
+                                    }
+                                    for p in method.parameters
+                                ],
+                                "return_type": str(method.return_type.name) if method.return_type else None,
+                                "is_static": 'static' in method.modifiers,
+                                "is_abstract": 'abstract' in method.modifiers,
+                                "annotations": [a.name for a in method.annotations] if method.annotations else [],
+                                # We'll just store a line count as a basic measure of complexity
+                                "body_line_count": (
+                                    len(method.body) if method.body else 0
+                                )
+                            }
+                            class_info["methods"].append(method_info)
+
+                        file_ir["classes"].append(class_info)
+
+                    elif isinstance(t, javalang.tree.InterfaceDeclaration):
+                        # Similar structure
+                        interface_info = {
+                            "name": t.name,
+                            "implements": [],  # Java doesn't do "implements" for interface
+                            "extends": [ext.name for ext in t.extends] if t.extends else [],
+                            "annotations": [a.name for a in t.annotations] if t.annotations else [],
+                            "fields": [],
+                            "methods": [],
+                            "type": "interface"
+                        }
+                        for method in t.methods:
+                            method_info = {
+                                "name": method.name,
+                                "params": [
+                                    {
+                                        "name": p.name,
+                                        "type": str(p.type.name) if p.type else None,
+                                    }
+                                    for p in method.parameters
+                                ],
+                                "return_type": str(method.return_type.name) if method.return_type else None,
+                                "is_static": 'static' in method.modifiers,
+                                "is_abstract": 'abstract' in method.modifiers,
+                                "annotations": [a.name for a in method.annotations] if method.annotations else [],
+                                "body_line_count": (
+                                    len(method.body) if method.body else 0
+                                )
+                            }
+                            interface_info["methods"].append(method_info)
+                        file_ir["classes"].append(interface_info)
+
+                    # If there's more exotic Java structures, handle them if needed
+                    # For brevity, we won't parse them in detail here
+
+                ir["files"].append(file_ir)
+
+    return ir
 
 
-def create_transform_prompt(java_files_str: str) -> str:
+def read_raw_java_sources(input_dir: str) -> str:
     """
-    Creates a carefully crafted prompt for the LLM, instructing it to:
-    - Convert the Java code into a modern Python web app using FastAPI, SQLAlchemy, Alembic.
-    - Use a best-practice project structure.
-    - Provide a README, requirements.txt, and at least one test in `tests/`.
-    - Follow best practices and PEP8.
+    Concatenate the raw text of all .java files, separated by markers.
+    This ensures we pass the original text to the LLM.
     """
-    # We can simply wrap the input Java code in the TRANSFORM_PROMPT_TEMPLATE
-    return TRANSFORM_PROMPT_TEMPLATE.format(file_list=java_files_str)
+    blocks = []
+    for root, dirs, files in os.walk(input_dir):
+        for f in files:
+            if f.endswith(".java"):
+                full_path = os.path.join(root, f)
+                rel_path = os.path.relpath(full_path, input_dir)
+                with open(full_path, "r", encoding="utf-8") as src_file:
+                    content = src_file.read()
+                blocks.append(f"# filename: {rel_path}\n{content}\n\n")
+    return "".join(blocks)
 
+
+# ----------------------------------------------------------------------
+# Output Parsing / Writing
+# ----------------------------------------------------------------------
 
 def split_and_write_files(llm_output: str, output_dir: str):
     """
-    Splits the LLM output based on `# filename: some_path` lines,
+    Splits the LLM output based on `# filename: some_path.ext` lines,
     then writes each file to the correct path under output_dir.
-    Supports .py, .md, .txt, etc.
     """
     lines = llm_output.splitlines()
     current_file = None
@@ -221,88 +356,27 @@ def split_and_write_files(llm_output: str, output_dir: str):
         print(f"[INFO] Written to {out_path}")
 
     for line in lines:
-        # Detect lines that start with '# filename:' followed by a valid path
         if line.startswith("# filename: ") and file_pattern.match(line):
-            # If we were tracking another file, write it before starting a new one
+            # If we were tracking another file, write it out first
             if current_file and content:
                 write_to_file(current_file, content)
                 content = []
 
             current_file = line[len("# filename: "):].strip()
         else:
-            # If it's a line of content (and we have a current file) gather it
             if current_file is not None:
                 content.append(line + "\n")
 
-    # Write the last file's content if any remains
+    # Write the last file if any remains
     if current_file and content:
         write_to_file(current_file, content)
 
 
-def read_entire_python_code(base_dir: str) -> str:
-    """
-    Recursively read all .py (and optionally .md, .txt) files from the
-    output directory to feed back into the LLM for the review steps.
-    """
-    aggregated_content = []
-    for root, dirs, files in os.walk(base_dir):
-        for filename in files:
-            # Optionally read just .py or also .md, .txt. Here we read .py for clarity
-            if filename.endswith((".py", ".md", ".txt")):
-                full_path = os.path.join(root, filename)
-                rel_path = os.path.relpath(full_path, base_dir)
-                with open(full_path, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                aggregated_content.append(f"# filename: {rel_path}\n{content}\n\n")
-    return "".join(aggregated_content)
+# ----------------------------------------------------------------------
+# Main Script Logic
+# ----------------------------------------------------------------------
 
-
-def perform_review_and_fix(
-    base_dir: str,
-    category: str,
-    output_dir: str,
-    temperature: float = 0.0,
-    max_tokens: int = 4000
-):
-    """
-    Perform a single pass of reviewing the code for either:
-     - Missing/incorrect HTTP endpoints
-     - Missing/incorrect DB schemas
-     - Missing/incorrect business logic
-    by prompting the LLM with the entire codebase as context.
-    """
-    # 1. Read the entire generated code
-    codebase_str = read_entire_python_code(base_dir)
-    # 2. Create the review prompt
-    review_prompt = REVIEW_PROMPT_TEMPLATE.format(category=category)
-    combined_prompt = f"{review_prompt}\n\nHere is the current codebase:\n\n{codebase_str}"
-    # 3. Call the LLM
-    review_response = call_llm_system_user(INTRO_PROMPT, combined_prompt, temperature=temperature, max_tokens=max_tokens)
-
-    if not review_response.strip():
-        print(f"[WARN] No response from LLM for {category} pass. Skipping write.")
-        return
-
-    # 4. Split and write the updated files
-    print(f"[INFO] Writing {category} pass changes into {output_dir}...")
-    split_and_write_files(review_response, output_dir)
-
-
-# -------------------------------------------------------------------------
-# Main Script Flow
-# -------------------------------------------------------------------------
 def main():
-    """
-    Main driver function:
-    1. Parse arguments.
-    2. Gather Java files content.
-    3. Create the prompt and call LLM to produce the initial Python code.
-    4. Split & write the generated files into the output directory.
-    5. Perform additional passes to review/fix missing or incorrect:
-         a. HTTP endpoints
-         b. Database schemas
-         c. Business logic
-    """
     if len(sys.argv) != 3:
         print("Usage: python convert_app.py <input_directory> <output_directory>")
         sys.exit(1)
@@ -314,49 +388,35 @@ def main():
         print(f"Error: '{input_dir}' is not a directory or does not exist.")
         sys.exit(1)
 
-    # Ensure the output directory exists
     os.makedirs(output_dir, exist_ok=True)
 
-    # 1) Gather all .java files
-    java_files_str = gather_java_files_content(input_dir)
-    if not java_files_str.strip():
-        print("[ERROR] No Java files found in input directory. Exiting.")
-        sys.exit(1)
+    # 1) Build IR from the Java files
+    print("[INFO] Parsing Java files to build IR...")
+    ir_data = parse_java_files(input_dir)
 
-    # 2) Create the transformation prompt
-    transform_prompt = create_transform_prompt(java_files_str)
+    # 2) Read raw Java code
+    print("[INFO] Reading raw Java sources...")
+    raw_java = read_raw_java_sources(input_dir)
 
-    # 3) Call the LLM for the initial Java->Python conversion
-    print("[INFO] Generating initial Python code from Java sources...")
-    llm_output = call_llm_system_user(INTRO_PROMPT, transform_prompt, temperature=0.0, max_tokens=8000)
+    # 3) Construct user prompt
+    user_prompt = USER_PROMPT_TEMPLATE.format(
+        ir=repr(ir_data),  # or could use json.dumps, but repr is enough for the LLM
+        raw_java_sources=raw_java
+    )
+
+    # 4) Call the LLM (system + user prompts)
+    print("[INFO] Calling LLM to transform Java -> Python codebase...")
+    llm_output = call_llm_system_user(SYSTEM_PROMPT, user_prompt, temperature=0.0, max_tokens=8000)
 
     if not llm_output.strip():
-        print("[ERROR] LLM returned an empty response for the transformation step.")
+        print("[ERROR] LLM returned an empty response. Exiting.")
         sys.exit(1)
 
-    # 4) Split and write the files into the output directory
-    print("[INFO] Writing initial pass files to output directory...")
+    # 5) Write the resulting files
+    print("[INFO] Writing output files to disk...")
     split_and_write_files(llm_output, output_dir)
 
-    # 5) Additional passes:
-    passes = [
-        "HTTP endpoints",
-        "database schemas",
-        "business logic",
-    ]
-    for p in passes:
-        print(f"\n[INFO] Starting review/fix pass for {p}...\n")
-        perform_review_and_fix(
-            base_dir=output_dir,
-            category=p,
-            output_dir=output_dir,
-            temperature=0.0,
-            max_tokens=4000
-        )
-        print(f"[INFO] Completed {p} pass.\n")
-
-    print("[INFO] All passes completed successfully!")
-    print("[INFO] Your updated Python codebase is located in:", output_dir)
+    print("\n[INFO] Conversion complete! Check your output directory for the new Python codebase.")
 
 
 if __name__ == "__main__":
