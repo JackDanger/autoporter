@@ -159,7 +159,6 @@ def call_gemini(prompt):
             )
             chunks = ""
             for chunk in response:
-                print(chunk.text, end='', flush=True)
                 chunks += chunk.text
             return chunks
         except Exception as e:
@@ -227,11 +226,12 @@ def write_output_structure(output_str: str, output_dir: Path) -> None:
         fpath = output_dir / fname
         fpath.parent.mkdir(parents=True, exist_ok=True)
         with fpath.open("w", encoding="utf-8") as f:
+            print(f"Writing to {fpath}")
             f.write(fcontent)
 
 
 def call_llm(prompt):
-    if openai_client.api_key is not None:
+    if openai_client.api_key:
         messages = [
             {"role": "system", "content": INTRO_PROMPT},
             {"role": "user", "content": prompt},
