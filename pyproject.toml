@@ -21,6 +21,7 @@ langchain-community = "^0.3.12"
 langchain-openai = "^0.2.13"
 langchain-cli = "^0.0.35"
 bs4 = "^0.0.2"
+javalang = "^0.13.0"
 
 
 [build-system]

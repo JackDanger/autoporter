@@ -1189,6 +1189,21 @@ test = ["packaging", "pickleshare", "pytest", "pytest-asyncio (<0.22)", "testpat
 test-extra = ["curio", "ipython[test]", "matplotlib (!=3.2.0)", "nbformat", "numpy (>=1.23)", "pandas", "trio"]
 
 [[package]]
+name = "javalang"
+version = "0.13.0"
+description = "Pure Python Java parser and tools"
+optional = false
+python-versions = "*"
+files = [
+    {file = "javalang-0.13.0-py2-none-any.whl", hash = "sha256:5c20f9ee81c49062341e78a88485d6a16f2fa7282856fecf79d2a9dc32374cca"},
+    {file = "javalang-0.13.0-py3-none-any.whl", hash = "sha256:b203c258919b085b44b43b89effcba7291bb2d90c02906b915b39e86aa9fd8e6"},
+    {file = "javalang-0.13.0.tar.gz", hash = "sha256:1681a5a480a58116d42a7eedfd132abe25e6c0ffe552868d581ad84e6aa3424c"},
+]
+
+[package.dependencies]
+six = "*"
+
+[[package]]
 name = "jedi"
 version = "0.19.2"
 description = "An autocompletion tool for Python that can be used for text editors."
@@ -3862,4 +3877,4 @@ propcache = ">=0.2.0"
 [metadata]
 lock-version = "2.0"
 python-versions = "^3.12"
-content-hash = "9b0d3a9f32b791ebbdaa6b8c8af3d9eaa2cd087135dd766c3541aabe3b984892"
+content-hash = "768de23e07359b95917e55f904d441a74924953a2dd0e45ed43a442ad256adb5"

@@ -34,8 +34,8 @@ from openai import OpenAI
 # ----------------------------------------------------------------------
 # LLM / Model Config
 # ----------------------------------------------------------------------
-OPENAI_MODEL = "gpt-4"  # Or "o1-preview", or any model you prefer
-GEMINI_MODEL = "gemini-2.0-bison"  # Example
+OPENAI_MODEL = "o1-preview"  # Or "o1-preview", or any model you prefer
+GEMINI_MODEL = "gemini-2.0-flash-exp"  # Example
 
 openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
 genai.configure(api_key=os.environ.get("GEMINI_API_KEY", ""))
@@ -56,16 +56,16 @@ You produce Python applications using:
 - Pytest for tests
 - PEP8 and best-practice architecture
 
-All code must be as close as possible in functionality to the Java source. If there's unclear Java logic, 
-comment it in Python for clarity. Preserve and translate inline comments where relevant. 
+All code must be as close as possible in functionality to the Java source. If there's unclear Java logic,
+comment it in Python for clarity. Preserve and translate inline comments where relevant.
 Use Python type hints, docstrings, and be as idiomatic as possible without losing the Java logic.
 """
 
-USER_PROMPT_TEMPLATE = """Below is an intermediate representation (IR) of the entire Java codebase 
+USER_PROMPT_TEMPLATE = """Below is an intermediate representation (IR) of the entire Java codebase
 (parsed with javalang) and, following that, the *raw text* of each .java file.
 
 Your goal:
-1. Faithfully convert *all* logic, data structures, classes, methods, and usage into a single coherent 
+1. Faithfully convert *all* logic, data structures, classes, methods, and usage into a single coherent
    Python application using FastAPI, SQLAlchemy, Alembic, and Pytest.
 2. Use a recommended file structure:
     app/
@@ -82,9 +82,9 @@ Your goal:
        env.py (or equivalent)
     requirements.txt (or pyproject.toml)
     README.md
-3. Avoid skipping or omitting code. If certain Java classes are not obviously connected, 
+3. Avoid skipping or omitting code. If certain Java classes are not obviously connected,
    still convert them as separate modules or routers.
-4. Keep the code no more complex than necessary, but do not lose logic. 
+4. Keep the code no more complex than necessary, but do not lose logic.
 5. The final output must be *all* necessary files, separated by the format:
    # filename: relative/path/to/file.py
    <contents>
@@ -99,38 +99,55 @@ Please now produce the final Python codebase, ensuring everything is included.
 Do not skip anything.
 """
 
+
 # ----------------------------------------------------------------------
 # LLM Utility Functions
 # ----------------------------------------------------------------------
-
 def call_llm_system_user(system_prompt: str, user_prompt: str, temperature=0.0, max_tokens=8000) -> str:
     """
     Calls the LLM with a system prompt and a user prompt using OpenAI if available,
     otherwise uses Gemini. Returns the LLM response text.
     """
+    combined_prompt = f"{system_prompt}\n\n{user_prompt}"
     if openai_client.api_key:
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
-        return call_openai_chat_completion(messages, temperature=temperature, max_tokens=max_tokens)
+        if OPENAI_MODEL == 'o1-preview':
+            messages = [
+                {"role": "user", "content": user_prompt}
+            ]
+            return call_openai_chat_completion(messages, temperature=temperature)
+        else:
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
+            return call_openai_chat_completion(messages, temperature=temperature, max_tokens=max_tokens)
     else:
-        combined_prompt = f"{system_prompt}\n\n{user_prompt}"
         return call_gemini(combined_prompt, temperature=temperature)
 
-def call_openai_chat_completion(messages: List[Dict[str, str]], temperature: float, max_tokens: int) -> str:
+
+def call_openai_chat_completion(messages: List[Dict[str, str]], temperature: float, max_tokens: int = None) -> str:
     """Call the OpenAI Chat API (gpt-4 or similar) and return the response content."""
     if not openai_client.api_key:
         raise ValueError("OPENAI_API_KEY environment variable not set or is empty.")
 
     print("[INFO] Contacting OpenAI Chat Completion API... Please wait.")
-    response = openai_client.chat.completions.create(
-        model=OPENAI_MODEL,
-        messages=messages,
-        temperature=temperature,
-        max_tokens=max_tokens,
-    )
-    return response.choices[0].message.content
+    if OPENAI_MODEL == 'o1-preview':
+        print(messages)
+        response = openai_client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=messages,
+            temperature=1,
+        )
+        return response.choices[0].message.content
+    else:
+        response = openai_client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        return response.choices[0].message.content
+
 
 def call_gemini(prompt: str, temperature=0.0) -> str:
     """Call the Gemini (Google PaLM) API for generation."""
@@ -160,10 +177,88 @@ def call_gemini(prompt: str, temperature=0.0) -> str:
     print("[ERROR] Failed to get a valid response from Google PaLM API.")
     return ""
 
+
+def chunk_text(text: str, max_chunk_size: int = 12000) -> List[str]:
+    """
+    Split a large string into multiple pieces, each at most `max_chunk_size` characters.
+    This prevents exceeding token limits.
+    """
+    chunks = []
+    start = 0
+    length = len(text)
+    while start < length:
+        end = min(start + max_chunk_size, length)
+        chunks.append(text[start:end])
+        start = end
+    return chunks
+
+
+def chunk_and_call_llm(ir_data: dict, raw_java: str, system_prompt: str, temperature=0.0, max_tokens=3000) -> str:
+    """
+    Break the raw Java source into manageable chunks, then iteratively call the LLM,
+    carrying forward partial code so everything is eventually addressed with proper context.
+
+    Steps:
+      1. Initialize an empty string 'accumulated_code'.
+      2. For each chunk of raw Java, call the LLM with:
+           - The IR (so it knows about the classes, methods, etc.).
+           - The code accumulated so far (so we keep context).
+           - The new chunk of Java code.
+      3. Update 'accumulated_code' from the LLM's response each time.
+    4. Return the final 'accumulated_code'.
+    """
+    # Split raw Java sources into chunks
+    java_chunks = chunk_text(raw_java, max_chunk_size=10000)  # Adjust as needed
+
+    accumulated_code = ""  # This will store the Python code generated so far
+
+    for i, chunk in enumerate(java_chunks):
+        # Build a user prompt that includes:
+        #   - The IR
+        #   - The current "accumulated" Python code
+        #   - This chunk of Java
+        user_prompt = f"""
+You have the following Intermediate Representation (IR) of the Java codebase:
+{repr(ir_data)}
+
+Below is the partial Python code you've generated so far (accumulated):
+\"\"\"
+{accumulated_code}
+\"\"\"
+
+Now, here is a chunk of the raw Java source we haven't processed yet:
+\"\"\"
+{chunk}
+\"\"\"
+
+Please update or extend the Python code so that it incorporates everything
+in this chunk *without* losing previously converted logic.
+If classes or methods already converted need to be refined, refine them.
+If new logic appears, incorporate it.
+Output *all* your updated Python code in the format:
+# filename: path/file.py
+<contents>
+
+Make sure to keep everything cohesive, PEP8-compliant, and not omit any logic.
+        """
+        print(f"[INFO] Processing chunk {i+1} / {len(java_chunks)}...")
+
+        # Call the LLM with the system prompt + user prompt + partial code context
+        updated_code = call_llm_system_user(system_prompt, user_prompt, temperature=temperature, max_tokens=max_tokens)
+
+        if updated_code.strip():
+            # Replace the accumulated code with whatever the LLM returned
+            accumulated_code = updated_code
+        else:
+            print("[WARN] Received empty response from LLM for this chunk, retaining previous code.")
+
+    # After all chunks are processed, 'accumulated_code' should (in theory) reflect the entire codebase
+    return accumulated_code
+
+
 # ----------------------------------------------------------------------
 # Java Parsing / IR Construction
 # ----------------------------------------------------------------------
-
 def parse_java_files(input_dir: str) -> Dict[str, Any]:
     """
     Parse all .java files using javalang, building an intermediate representation.
@@ -233,7 +328,7 @@ def parse_java_files(input_dir: str) -> Dict[str, Any]:
                     if isinstance(t, javalang.tree.ClassDeclaration) or isinstance(t, javalang.tree.EnumDeclaration):
                         class_info = {
                             "name": t.name,
-                            "extends": str(t.extends.name) if t.extends else None,
+                            "extends": str(t.extends.name) if (not isinstance(t, javalang.tree.EnumDeclaration) and t.extends) else None,
                             "implements": [i.name for i in t.implements] if t.implements else [],
                             "annotations": [a.name for a in t.annotations] if t.annotations else [],
                             "fields": [],
@@ -405,8 +500,14 @@ def main():
     )
 
     # 4) Call the LLM (system + user prompts)
-    print("[INFO] Calling LLM to transform Java -> Python codebase...")
-    llm_output = call_llm_system_user(SYSTEM_PROMPT, user_prompt, temperature=0.0, max_tokens=8000)
+    print("[INFO] Generating Python code from Java sources with chunked pagination...")
+    llm_output = chunk_and_call_llm(
+        ir_data=ir_data,
+        raw_java=raw_java,
+        system_prompt=SYSTEM_PROMPT,
+        temperature=0.0,
+        max_tokens=3000  # Lower max_tokens per chunk so as not to exceed model limits
+    )
 
     if not llm_output.strip():
         print("[ERROR] LLM returned an empty response. Exiting.")
