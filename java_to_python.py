@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 
 """
-A script to automatically convert a legacy Java application into a modern Python web application,
-complete with unit tests, a README, and best-practice structures (FastAPI, SQLAlchemy, Alembic).
+A script to automatically convert a legacy Java application into a modern Python web application
+and then perform iterative review/fix passes to close gaps in HTTP endpoints, database schemas,
+and business logic.
 
 Usage:
     python convert_app.py <input_directory> <output_directory>
 
 Environment Variables:
-    OPENAI_API_KEY: Your OpenAI API key.
+    OPENAI_API_KEY: Your OpenAI API key. (Required to use the OpenAI LLM pass)
+    GEMINI_API_KEY: Your Google PaLM API key. (Used if OPENAI_API_KEY is not set)
 
 Requirements:
-    pip install openai
+    pip install openai google-generativeai
 """
 
 import os
@@ -22,13 +24,21 @@ from typing import List, Dict
 import google.generativeai as genai
 from openai import OpenAI
 
+# -------------------------------------------------------------------------
+# LLM / Model Config
+# -------------------------------------------------------------------------
 OPENAI_MODEL = "o1-preview"
 GEMINI_MODEL = 'gemini-2.0-flash-exp'
+
 openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
-genai.configure(api_key=os.environ['GEMINI_API_KEY'])
+genai.configure(api_key=os.environ.get('GEMINI_API_KEY', ''))
 gemini_model = genai.GenerativeModel(model_name=GEMINI_MODEL)
 
+# -------------------------------------------------------------------------
+# Prompts
+# -------------------------------------------------------------------------
 
+# High-level system instructions for converting Java -> Python
 INTRO_PROMPT = """You are a world-class expert in converting legacy Java codebases to modern Python web backends using FastAPI, SQLAlchemy, and Alembic for migrations.
 You also produce comprehensive unit tests using pytest, and ensure that all code is fully documented, idiomatic, and clean.
 You use Python best practices, type hints, and docstrings in Google style.
@@ -39,23 +49,17 @@ You will be given a list of files from a legacy Java codebase and asked to:
     - `app/` directory containing `main.py` (FastAPI startup), `models.py` (SQLAlchemy models), `schemas.py` (Pydantic schemas), `routers/`, etc.
     - `tests/` directory containing pytest-based tests for all major components.
     - `alembic/` directory for migrations.
-3. Port logic from Java classes (controllers, services, DAOs, entities, etc.) into Python equivalents with proper layering. For instance:
-    - Java entities and DTOs become SQLAlchemy models and Pydantic schemas.
-    - Java controllers become FastAPI routers.
-    - Java services become Python modules with business logic.
-4. Update and improve comments, docstrings, and overall code clarity. If the original code has unclear logic or poor structure, improve it gracefully.
+3. Port logic from Java classes (controllers, services, DAOs, entities, etc.) into Python equivalents with proper layering.
+4. Update and improve comments, docstrings, and overall code clarity.
 5. Generate a requirements.txt or pyproject.toml if needed.
 6. Add Alembic migrations as needed.
-7. Provide at least one comprehensive pytest test file that covers key aspects of the application.
-8. After completing the conversion, output a structured plan and the final Python files.
-
-You may receive multiple steps and instructions. At the end, you will produce:
-- A directory structure with all the needed Python files.
-- A summary of changes and improvements.
+7. Provide a comprehensive pytest test file that covers key aspects of the application.
+8. At the end, produce a directory structure with all the needed Python files plus a summary of changes and improvements.
 
 Follow best practices strictly. Utilize Python 3.9+ features and type hints.
 """
 
+# Template for transforming Java -> Python
 TRANSFORM_PROMPT_TEMPLATE = """You are given a set of Java source files and their contents. You have already read the instructions above.
 Now, analyze the provided files and produce a modern Python FastAPI application as described.
 
@@ -80,8 +84,95 @@ Step-by-step, do the following:
 Make sure the resulting code is self-contained, understandable, and runs as a standalone Python application once dependencies are installed and Alembic migrations are applied.
 """
 
+# Prompt for iterative passes that look for missing or incorrect pieces
+REVIEW_PROMPT_TEMPLATE = """You are given the Python code for a newly migrated application.
+Now, carefully review and improve it with respect to potential gaps or mistakes in:
+1. Missing or incorrect {category}.
 
-def gather_java_files_content(start_path):
+Provide updated files if anything requires changing or adding.
+Follow best practices in FastAPI, SQLAlchemy, migrations, and business logic.
+If something is already correct, keep it as is.
+
+Output your revised code using the pattern:
+# filename: ...
+<code here>
+
+Include only the updated or new content for each file. If a file needs no changes, provide it anyway for completeness.
+"""
+
+
+# -------------------------------------------------------------------------
+# LLM Utility Functions
+# -------------------------------------------------------------------------
+def call_llm_system_user(system_prompt: str, user_prompt: str, temperature=0.0, max_tokens=8000) -> str:
+    """
+    Calls the LLM with a system prompt and a user prompt using OpenAI if available,
+    otherwise uses Gemini.
+    """
+    # If we have an OpenAI key, use OpenAI
+    if openai_client.api_key:
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        return call_openai_chat_completion(messages, temperature=temperature, max_tokens=max_tokens)
+    else:
+        # Otherwise, fallback to Gemini PaLM
+        combined_prompt = f"{system_prompt}\n\n{user_prompt}"
+        return call_gemini(combined_prompt)
+
+
+def call_openai_chat_completion(
+    messages: List[Dict[str, str]], temperature: float = 0.0, max_tokens: int = 8000
+) -> str:
+    """Call the OpenAI Chat API and return the response content."""
+    if not openai_client.api_key:
+        raise ValueError("OPENAI_API_KEY environment variable not set.")
+
+    print("[INFO] Contacting OpenAI Chat Completion API... Please wait.")
+    response = openai_client.chat.completions.create(
+        model=OPENAI_MODEL,
+        messages=messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+    return response.choices[0].message.content
+
+
+def call_gemini(prompt):
+    """Call the Gemini (Google PaLM) API for generation."""
+    max_retries = 15
+    retry_delay = 1  # Start with 1-second delay
+
+    for attempt in range(max_retries):
+        try:
+            print("[INFO] Contacting Google PaLM API (Gemini)... Please wait.")
+            response = gemini_model.generate_content(
+                prompt,
+                generation_config=genai.types.GenerationConfig(
+                    candidate_count=1,
+                    temperature=0.8,
+                ),
+                stream=True,
+            )
+            chunks = ""
+            for chunk in response:
+                chunks += chunk.text
+            return chunks
+        except Exception as e:
+            print(f"[WARN] Error generating response: {e}. Retrying in {retry_delay} seconds...")
+            time.sleep(retry_delay)
+            retry_delay *= 2  # Exponential backoff
+
+    print("[ERROR] Failed to get a valid response from Google PaLM API.")
+    return ""
+
+# -------------------------------------------------------------------------
+# File Handling Utilities
+# -------------------------------------------------------------------------
+
+
+def gather_java_files_content(start_path: str) -> str:
     """
     Recursively walks the input directory, reading the contents of each .java file
     and returning them in a single string, separated by markers indicating filename.
@@ -98,124 +189,36 @@ def gather_java_files_content(start_path):
     return "".join(java_files_content)
 
 
-def create_prompt(java_files_str):
+def create_transform_prompt(java_files_str: str) -> str:
     """
     Creates a carefully crafted prompt for the LLM, instructing it to:
     - Convert the Java code into a modern Python web app using FastAPI, SQLAlchemy, Alembic.
-    - Use a blueprint/module pattern.
-    - Provide a README, requirements.txt, and at least one test in the tests/ folder.
+    - Use a best-practice project structure.
+    - Provide a README, requirements.txt, and at least one test in `tests/`.
     - Follow best practices and PEP8.
     """
-    initial_instructions = (
-        "Below is the entire source code of a legacy Java application. "
-        "You are a veteran application migration engineer and a principal-level Python developer.\n\n"
-        "Carefully analyze the Java code and produce a fully modern, production-grade Python web application.\n"
-        "Use these technologies and patterns:\n"
-        "- FastAPI for the web framework.\n"
-        "- SQLAlchemy for database interactions.\n"
-        "- Alembic for migrations.\n"
-        "- A blueprint or module-based project layout.\n\n"
-        "Additionally, please:\n"
-        "- Remove unnecessary Java ceremony.\n"
-        "- Include a README.md with instructions on how to install, run, and test the application.\n"
-        "- Include a requirements.txt listing any needed Python libraries.\n"
-        "- Provide a unit test suite in a tests/ directory (at least one test file is required).\n"
-        "- Ensure the Python code is PEP8-compliant.\n"
-        "- Use type hints, docstrings, and follow Python best practices.\n"
-        "Avoid partial or incomplete files; produce only fully working code.\n\n"
-        "Here is the Java source:\n\n"
-    )
-
-    final_instructions = (
-        "\n\n"
-        "Now, convert all of this Java code into a Python codebase. \n"
-        "Include all necessary Python files with correct filenames. \n"
-        "Separate files with the comment pattern:\n"
-        "`# filename: path/to/file.py`\n\n"
-        "Your response should be a self-contained solution with:\n"
-        "1. The main FastAPI application.\n"
-        "2. A README.md.\n"
-        "3. A requirements.txt.\n"
-        "4. A tests/ folder containing at least one test file.\n"
-        "5. Alembic migration scripts or placeholders for them.\n\n"
-        "Make sure the code runs as-is when placed in the correct file structure.\n"
-        "Thank you!"
-    )
-
-    return initial_instructions + java_files_str + final_instructions
+    # We can simply wrap the input Java code in the TRANSFORM_PROMPT_TEMPLATE
+    return TRANSFORM_PROMPT_TEMPLATE.format(file_list=java_files_str)
 
 
-def call_llm(prompt):
-    if openai_client.api_key:
-        messages = [
-            {"role": "system", "content": INTRO_PROMPT},
-            {"role": "user", "content": prompt},
-        ]
-        return call_openai_chat_completion(messages)
-    else:
-        return call_gemini(f"{INTRO_PROMPT}\n\n{prompt}")
-
-
-def call_openai_chat_completion(messages: List[Dict[str, str]], temperature: float = 0.0, max_tokens: int = 8000) -> str:
-    """Call the OpenAI Chat API and return the response content."""
-    if not openai_client.api_key:
-        raise ValueError("OPENAI_API_KEY environment variable not set.")
-
-    # Since this is a single request that may take some time, we can show a simple message:
-    print("Contacting the LLM to transform your code... Please wait.")
-
-    response = openai_client.chat.completions.create(model=OPENAI_MODEL,
-                                                     messages=messages,
-                                                     temperature=temperature,
-                                                     max_tokens=max_tokens)
-    return response.choices[0].message.content
-
-
-def call_gemini(prompt):
-    max_retries = 15
-    retry_delay = 1  # Start with 1-second delay
-
-    for attempt in range(max_retries):
-        try:
-            response = gemini_model.generate_content(
-                prompt,
-                generation_config=genai.types.GenerationConfig(
-                    candidate_count=1,
-                    temperature=0.8,
-                ),
-                stream=True,
-            )
-            chunks = ""
-            for chunk in response:
-                chunks += chunk.text
-            return chunks
-        except Exception as e:
-            print_step(
-                f"Error generating response: {e}. Retrying in {retry_delay} seconds..."
-            )
-            time.sleep(retry_delay)
-            retry_delay *= 2  # Exponential backoff
-    print_step("Failed to get a valid response from the Google PaLM API.")
-    return ''
-
-
-def split_and_write_files(llm_output, output_dir):
+def split_and_write_files(llm_output: str, output_dir: str):
     """
-    Splits the LLM output based on `# filename: some_path.py` lines,
+    Splits the LLM output based on `# filename: some_path` lines,
     then writes each file to the correct path under output_dir.
+    Supports .py, .md, .txt, etc.
     """
     lines = llm_output.splitlines()
     current_file = None
     content = []
 
-    def write_to_file(path, lines_content):
+    file_pattern = re.compile(r"^# filename:\s+[\w.\-/\\]+(\.py|\.md|\.txt)$")
+
+    def write_to_file(path: str, lines_content: List[str]):
         out_path = os.path.join(output_dir, path)
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
         with open(out_path, 'w', encoding='utf-8') as file:
             file.write("".join(lines_content))
         print(f"[INFO] Written to {out_path}")
-
-    file_pattern = re.compile(r"^# filename:\s+[\w.\-/\\]+\.py$|^# filename:\s+[\w.\-/\\]+\.md$|^# filename:\s+[\w.\-/\\]+\.txt$")
 
     for line in lines:
         # Detect lines that start with '# filename:' followed by a valid path
@@ -226,7 +229,6 @@ def split_and_write_files(llm_output, output_dir):
                 content = []
 
             current_file = line[len("# filename: "):].strip()
-
         else:
             # If it's a line of content (and we have a current file) gather it
             if current_file is not None:
@@ -237,18 +239,69 @@ def split_and_write_files(llm_output, output_dir):
         write_to_file(current_file, content)
 
 
-def print_step(step):
-    print(f"[Step] {step}")
+def read_entire_python_code(base_dir: str) -> str:
+    """
+    Recursively read all .py (and optionally .md, .txt) files from the
+    output directory to feed back into the LLM for the review steps.
+    """
+    aggregated_content = []
+    for root, dirs, files in os.walk(base_dir):
+        for filename in files:
+            # Optionally read just .py or also .md, .txt. Here we read .py for clarity
+            if filename.endswith((".py", ".md", ".txt")):
+                full_path = os.path.join(root, filename)
+                rel_path = os.path.relpath(full_path, base_dir)
+                with open(full_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                aggregated_content.append(f"# filename: {rel_path}\n{content}\n\n")
+    return "".join(aggregated_content)
 
 
+def perform_review_and_fix(
+    base_dir: str,
+    category: str,
+    output_dir: str,
+    temperature: float = 0.0,
+    max_tokens: int = 4000
+):
+    """
+    Perform a single pass of reviewing the code for either:
+     - Missing/incorrect HTTP endpoints
+     - Missing/incorrect DB schemas
+     - Missing/incorrect business logic
+    by prompting the LLM with the entire codebase as context.
+    """
+    # 1. Read the entire generated code
+    codebase_str = read_entire_python_code(base_dir)
+    # 2. Create the review prompt
+    review_prompt = REVIEW_PROMPT_TEMPLATE.format(category=category)
+    combined_prompt = f"{review_prompt}\n\nHere is the current codebase:\n\n{codebase_str}"
+    # 3. Call the LLM
+    review_response = call_llm_system_user(INTRO_PROMPT, combined_prompt, temperature=temperature, max_tokens=max_tokens)
+
+    if not review_response.strip():
+        print(f"[WARN] No response from LLM for {category} pass. Skipping write.")
+        return
+
+    # 4. Split and write the updated files
+    print(f"[INFO] Writing {category} pass changes into {output_dir}...")
+    split_and_write_files(review_response, output_dir)
+
+
+# -------------------------------------------------------------------------
+# Main Script Flow
+# -------------------------------------------------------------------------
 def main():
     """
     Main driver function:
     1. Parse arguments.
     2. Gather Java files content.
-    3. Create the final prompt.
-    4. Call the LLM once to get the new Python code.
-    5. Split and write the files into the output directory.
+    3. Create the prompt and call LLM to produce the initial Python code.
+    4. Split & write the generated files into the output directory.
+    5. Perform additional passes to review/fix missing or incorrect:
+         a. HTTP endpoints
+         b. Database schemas
+         c. Business logic
     """
     if len(sys.argv) != 3:
         print("Usage: python convert_app.py <input_directory> <output_directory>")
@@ -264,19 +317,46 @@ def main():
     # Ensure the output directory exists
     os.makedirs(output_dir, exist_ok=True)
 
-    # Gather all .java files
+    # 1) Gather all .java files
     java_files_str = gather_java_files_content(input_dir)
+    if not java_files_str.strip():
+        print("[ERROR] No Java files found in input directory. Exiting.")
+        sys.exit(1)
 
-    # Create the prompt
-    prompt = create_prompt(java_files_str)
-    print(prompt)
+    # 2) Create the transformation prompt
+    transform_prompt = create_transform_prompt(java_files_str)
 
-    # Call the LLM
-    llm_output = call_llm(prompt)
-    print(llm_output)
+    # 3) Call the LLM for the initial Java->Python conversion
+    print("[INFO] Generating initial Python code from Java sources...")
+    llm_output = call_llm_system_user(INTRO_PROMPT, transform_prompt, temperature=0.0, max_tokens=8000)
 
-    # Write the results to the output directory
+    if not llm_output.strip():
+        print("[ERROR] LLM returned an empty response for the transformation step.")
+        sys.exit(1)
+
+    # 4) Split and write the files into the output directory
+    print("[INFO] Writing initial pass files to output directory...")
     split_and_write_files(llm_output, output_dir)
+
+    # 5) Additional passes:
+    passes = [
+        "HTTP endpoints",
+        "database schemas",
+        "business logic",
+    ]
+    for p in passes:
+        print(f"\n[INFO] Starting review/fix pass for {p}...\n")
+        perform_review_and_fix(
+            base_dir=output_dir,
+            category=p,
+            output_dir=output_dir,
+            temperature=0.0,
+            max_tokens=4000
+        )
+        print(f"[INFO] Completed {p} pass.\n")
+
+    print("[INFO] All passes completed successfully!")
+    print("[INFO] Your updated Python codebase is located in:", output_dir)
 
 
 if __name__ == "__main__":
