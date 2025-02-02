@@ -36,9 +36,15 @@ from openai import OpenAI
 # ----------------------------------------------------------------------
 OPENAI_MODEL = "o1-preview"  # Or "o1-preview", or any model you prefer
 GEMINI_MODEL = "gemini-2.0-flash-exp"  # Example
+DEEPSEEK_MODEL = 'deepseek-reasonoer'
 
-openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
-genai.configure(api_key=os.environ.get("GEMINI_API_KEY", ""))
+openai_api_key = os.environ.get("OPENAI_API_KEY", "")
+deepseek_api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+gemini_api_key = os.environ.get("GEMINI_API_KEY", "")
+
+openai_client = OpenAI(api_key=openai_api_key)
+deepseek_client = OpenAI(api_key=deepseek_api_key, base_url="https://api.deepseek.com")
+genai.configure(api_key=gemini_api_key)
 gemini_model = genai.GenerativeModel(model_name=GEMINI_MODEL)
 
 # ----------------------------------------------------------------------
@@ -109,39 +115,40 @@ def call_llm_system_user(system_prompt: str, user_prompt: str, temperature=0.0, 
     otherwise uses Gemini. Returns the LLM response text.
     """
     combined_prompt = f"{system_prompt}\n\n{user_prompt}"
-    if openai_client.api_key:
+    if openai_api_key:
         if OPENAI_MODEL == 'o1-preview':
             messages = [
                 {"role": "user", "content": user_prompt}
             ]
-            return call_openai_chat_completion(messages, temperature=temperature)
+            return call_openai_chat_completion(openai_client, OPENAI_MODEL, messages, temperature=temperature)
         else:
             messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ]
-            return call_openai_chat_completion(messages, temperature=temperature, max_tokens=max_tokens)
-    else:
+            return call_openai_chat_completion(openai_client, OPENAI_MODEL, messages, temperature=temperature, max_tokens=max_tokens)
+    elif gemini_api_key:
         return call_gemini(combined_prompt, temperature=temperature)
+    elif deepseek_api_key:
+        return call_openai_chat_completion(deepseek_client, DEEPSEEK_MODEL, messages)
 
 
-def call_openai_chat_completion(messages: List[Dict[str, str]], temperature: float, max_tokens: int = None) -> str:
-    """Call the OpenAI Chat API (gpt-4 or similar) and return the response content."""
-    if not openai_client.api_key:
-        raise ValueError("OPENAI_API_KEY environment variable not set or is empty.")
+def call_openai_chat_completion(client, model_name, messages: List[Dict[str, str]], temperature: float, max_tokens: int = None) -> str:
+    """
+    Call any openai-compatible API endpoint
+    """
+    print("[INFO] Contacting Chat Completion API... Please wait.")
 
-    print("[INFO] Contacting OpenAI Chat Completion API... Please wait.")
-    if OPENAI_MODEL == 'o1-preview':
-        print(messages)
-        response = openai_client.chat.completions.create(
-            model=OPENAI_MODEL,
+    if model_name in ['o1-preview', 'deepseek-reasoner']:
+        response = client.chat.completions.create(
+            model=model_name,
             messages=messages,
             temperature=1,
         )
         return response.choices[0].message.content
     else:
-        response = openai_client.chat.completions.create(
-            model=OPENAI_MODEL,
+        response = client.chat.completions.create(
+            model=model_name,
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
