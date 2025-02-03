@@ -1,22 +1,17 @@
 #!/usr/bin/env python3
 """
 A conversion tool to transform legacy 2018-era .NET (C#) applications into a modern Python codebase
-using FastAPI, SQLAlchemy, Alembic, pytest, and the blueprint architecture. In addition, it generates
-a working Dockerfile.
+using FastAPI, SQLAlchemy, Alembic, pytest, and a blueprint architecture. In addition, it generates
+a working Dockerfile (and optionally docker-compose.yml).
 
-This tool runs multiple conversion passes to capture:
+This tool performs multiple passes over the project so as to capture:
   - Database models and migrations
   - HTTP endpoints and controllers
-  - Business logic including authentication, credentials, HTML/text templating, email delivery,
-    service-to-service calls, and database queries
+  - Business logic (including authentication, credentials, templating, email delivery)
+  - Service-to-service calls and database queries
   - Comprehensive unit tests (pytest)
-  - Docker containerization
-
-High-level strategies include:
-  - Building an advanced IR (with rudimentary dependency graph analysis)
-  - Iterative multi-pass LLM conversion (each pass focusing on one area)
-  - Chunking large inputs to avoid token limits
-  - Merging and consolidating code over many iterations
+  - Critical configuration (including XML files with SQL queries and settings)
+  - Containerization via Docker
 
 Usage:
     python convert_dotnet_to_python.py <input_directory> <output_directory>
@@ -67,6 +62,7 @@ gemini_model_instance = None
 if gemini_api_key:
     gemini_model_instance = genai.GenerativeModel(model_name=GEMINI_MODEL)
 
+
 if gemini_api_key:
     MAX_TOKENS = 800000
 elif deepseek_api_key:
@@ -74,61 +70,62 @@ elif deepseek_api_key:
 elif openai_api_key:
     MAX_TOKENS = 5000
 
-
 # ----------------------------------------------------------------------
 # System Prompt and Multi-Pass Objectives
 # ----------------------------------------------------------------------
 SYSTEM_PROMPT = (
     "You are an expert software engineer with deep experience converting legacy .NET (C#) applications "
-    "into modern Python applications using FastAPI, SQLAlchemy, Alembic, pytest, and the blueprint architecture. \n"
+    "into modern Python applications using FastAPI, SQLAlchemy, Alembic, pytest, and a modular blueprint architecture. \n"
+    "The legacy projects include not only C# source code but also XML configuration files containing critical SQL queries, "
+    "connection settings, and other configuration data. \n"
     "Your output must capture all key aspects including database models/migrations, HTTP endpoints, business logic, "
-    "authentication and credentials, HTML/text templating, email delivery, service-to-service calls, and database queries. \n"
-    "Additionally, you must produce a working Dockerfile and container configuration. \n"
-    "Adhere strictly to best practices, PEP8 standards, and produce code that is modular, maintainable, and cohesive. \n"
-    "Include inline comments where necessary and produce each output file prefixed by '# filename: <relative/path>'."
+    "authentication and credentials, HTML/text templating, email delivery, service-to-service calls, and complex database queries. \n"
+    "Additionally, you must produce a working Dockerfile (and docker-compose.yml if needed) to containerize the application. \n"
+    "Follow best practices and PEP8 standards; produce modular, maintainable code with inline comments as needed. \n"
+    "Output each file with a marker in the format: '# filename: relative/path/to/file'."
 )
 
-# Define a list of conversion passes with detailed objectives.
+# Define conversion passes with explicit objectives
 CONVERSION_PASSES = [
     (
         "Base Conversion",
-        "Convert the legacy .NET application into a basic Python codebase using FastAPI with a blueprint architecture. "
-        "Extract general business logic and create a preliminary structure including initial controllers and modules.",
+        "Convert the legacy .NET application into a basic Python codebase using FastAPI with a modular blueprint architecture. "
+        "Extract and translate the general business logic from the C# code.",
     ),
     (
         "Database Models & Migrations",
-        "Analyze and extract all database-related logic from the .NET code. Convert database models into SQLAlchemy models "
-        "and generate Alembic migration scripts capturing schema changes.",
+        "Identify and extract all database-related logic and SQL queries from both C# and XML files. "
+        "Convert database models to SQLAlchemy models and generate Alembic migration scripts.",
     ),
     (
         "HTTP Endpoints & Controllers",
-        "Identify and convert all HTTP endpoints and controllers from the legacy code into FastAPI routers. "
-        "Ensure proper separation of concerns between routes and business logic.",
+        "Extract HTTP endpoints and controllers from the legacy .NET project and convert them into FastAPI routers. "
+        "Ensure a clear separation of concerns.",
     ),
     (
         "Authentication, Templating & Email Delivery",
-        "Extract logic related to authentication, credential management, HTML and text templating, and email delivery. "
-        "Convert these into idiomatic Python code using standard libraries and best practices.",
+        "Identify legacy authentication logic, HTML/text templating, and email delivery code (possibly spread across C# and XML). "
+        "Convert these into idiomatic Python code with secure best practices.",
     ),
     (
         "Service-to-Service Calls & Database Queries",
-        "Convert any service-to-service calls and complex database queries from the .NET application into asynchronous "
-        "HTTP calls and robust SQLAlchemy query logic.",
+        "Convert service-to-service communication and any complex database queries from the legacy code into asynchronous HTTP calls "
+        "and robust SQLAlchemy query logic.",
     ),
     (
         "Unit Tests",
-        "Generate a comprehensive suite of unit tests using pytest that covers all the functionality converted so far. "
-        "Ensure tests are organized per module and cover edge cases and business logic.",
+        "Generate a comprehensive suite of unit tests using pytest that covers all the converted functionality. "
+        "Organize tests per module and include edge cases.",
     ),
     (
         "Dockerization",
-        "Generate a working Dockerfile (and docker-compose.yml if necessary) that containerizes the entire Python application. "
-        "Ensure that environment variables and dependency installations are properly configured.",
+        "Produce a complete Dockerfile (and docker-compose.yml if needed) that containerizes the entire Python application. "
+        "Ensure that all dependencies, environment variables, and build instructions are correctly specified.",
     ),
     (
         "Final Consolidation",
-        "Perform a final pass that consolidates all previous changes into a cohesive, consistent codebase. "
-        "Refine the structure, resolve any dependency issues, and ensure overall code quality and adherence to best practices.",
+        "Perform a final pass that consolidates all previous outputs into a cohesive, consistent, PEP8-compliant codebase. "
+        "Resolve any dependency issues and ensure that configuration, business logic, and infrastructure files (like the Dockerfile) are present.",
     ),
 ]
 
@@ -244,52 +241,44 @@ def chunk_text(text: str, max_chunk_size: int = 12000) -> List[str]:
 # Multi-Pass Conversion Functionality
 # ----------------------------------------------------------------------
 def multi_pass_conversion(
-    ir_data: dict, raw_dotnet: str, temperature=0.0, max_tokens=3000
+    ir_data: dict, raw_project: str, temperature=0.0, max_tokens=3000
 ) -> str:
     """
-    Performs multiple iterative passes over the legacy .NET code to incrementally convert it
-    into a modern Python codebase. Each pass refines a different aspect of the conversion.
+    Performs multiple iterative passes over the legacy .NET project (including C# and XML files)
+    to incrementally convert it into a modern Python codebase.
     """
-    # Start with an empty accumulated code base.
     accumulated_code = ""
+    project_chunks = chunk_text(raw_project, max_chunk_size=10000)
+    context_source = "\n".join(project_chunks)
 
-    # For very large raw sources, break into chunks for context.
-    dotnet_chunks = chunk_text(raw_dotnet, max_chunk_size=10000)
-    context_source = "\n".join(
-        dotnet_chunks
-    )  # You might choose to refine per-pass chunking
-
-    # Iterate over the defined conversion passes.
     for pass_index, (pass_name, pass_objective) in enumerate(
         CONVERSION_PASSES, start=1
     ):
         user_prompt = (
             f"=== Conversion Pass {pass_index}: {pass_name} ===\n\n"
             f"Objective: {pass_objective}\n\n"
-            "Below is the Intermediate Representation (IR) of the legacy .NET codebase:\n"
+            "Below is the Intermediate Representation (IR) of the legacy .NET project:\n"
             f"{repr(ir_data)}\n\n"
-            "Below is the complete raw .NET source code (with file markers):\n"
+            "Below is the complete raw legacy project source code, including all .cs and XML files, with file markers:\n"
             f"{context_source}\n\n"
             "The Python code generated so far is as follows:\n"
             "-------------------------\n"
             f"{accumulated_code}\n"
             "-------------------------\n\n"
             "Please update and extend the code to address the above objective for this pass. "
-            "If necessary, refine previously generated logic, add new modules, endpoints, models, "
-            "tests, or configuration files. Output all of your updated code using the format:\n"
+            "If necessary, refine previously generated logic, add new modules, endpoints, models, tests, "
+            "or configuration files (such as a Dockerfile). Output all of your updated code using the format:\n"
             "# filename: relative/path/to/file\n"
             "<file contents>\n\n"
-            "Do not omit any functionality; ensure that the final result includes proper handling "
-            "for database models, migrations, HTTP endpoints, authentication, templating, email delivery, "
-            "service-to-service calls, database queries, unit tests, and a working Dockerfile."
+            "Do not omit any functionality; ensure that configuration, SQL queries (from XML), business logic, "
+            "and Docker containerization are all present."
         )
         print(f"[INFO] Starting pass {pass_index}: {pass_name} ...")
-        # Call the LLM with the system prompt and current pass objective
         pass_result = call_llm_system_user(
             SYSTEM_PROMPT, user_prompt, temperature=temperature, max_tokens=max_tokens
         )
         if pass_result.strip():
-            accumulated_code = pass_result  # Replace previous code with refined version
+            accumulated_code = pass_result
         else:
             print(
                 f"[WARN] Pass {pass_index} returned empty result; retaining previous code."
@@ -299,37 +288,14 @@ def multi_pass_conversion(
 
 
 # ----------------------------------------------------------------------
-# .NET (C#) Parsing / Advanced IR Construction
+# .NET (C#) and XML Parsing / Advanced IR Construction
 # ----------------------------------------------------------------------
-def parse_dotnet_files(input_dir: str) -> Dict[str, Any]:
+def parse_cs_files(input_dir: str) -> List[Dict[str, Any]]:
     """
-    Parses all .cs files in the input directory to build an advanced IR.
-    The IR includes classes, interfaces, methods, properties, fields, and uses simple heuristics
-    to capture potential dependency information (for use in multi-pass conversion).
-
-    The structure is:
-      {
-        "files": [
-           {
-             "filename": "relative/path/to/file.cs",
-             "types": [
-                {
-                  "name": <name>,
-                  "type": "class" | "interface" | "struct",
-                  "methods": [<method names>],
-                  "properties": [<property names>],
-                  "fields": [<field names>],
-                  "dependencies": [<other types referenced>]
-                },
-                ...
-             ]
-           },
-           ...
-        ]
-      }
+    Parses all .cs files to build an IR of C# source code.
+    Returns a list of file IRs.
     """
-    ir = {"files": []}
-    # Simple regex patterns for types, methods, properties, and fields.
+    cs_files = []
     type_pattern = re.compile(
         r"\b(public|internal|private|protected)?\s*(partial\s+)?(class|interface|struct)\s+(\w+)",
         re.MULTILINE,
@@ -368,9 +334,8 @@ def parse_dotnet_files(input_dir: str) -> Dict[str, Any]:
                         "methods": [],
                         "properties": [],
                         "fields": [],
-                        "dependencies": [],  # We could later use call graphs to populate this
+                        "dependencies": [],
                     }
-                    # Search for methods, properties, and fields within the file (simple heuristic)
                     for m in method_pattern.finditer(content):
                         if m.start() > match.end():
                             type_info["methods"].append(m.group(4))
@@ -381,18 +346,52 @@ def parse_dotnet_files(input_dir: str) -> Dict[str, Any]:
                         if fmatch.start() > match.end():
                             type_info["fields"].append(fmatch.group(3))
                     file_ir["types"].append(type_info)
-                ir["files"].append(file_ir)
+                cs_files.append(file_ir)
+    return cs_files
+
+
+def parse_xml_files(input_dir: str) -> List[Dict[str, str]]:
+    """
+    Parses all XML files to build a brief IR for configuration and SQL query files.
+    Returns a list of dictionaries with filename and a snippet of the content.
+    """
+    xml_files = []
+    for root, dirs, files in os.walk(input_dir):
+        for f in files:
+            if f.endswith(".xml"):
+                full_path = os.path.join(root, f)
+                rel_path = os.path.relpath(full_path, input_dir)
+                try:
+                    with open(
+                        full_path, "r", encoding="utf-8", errors="ignore"
+                    ) as xml_file:
+                        content = xml_file.read()
+                except Exception as e:
+                    content = f"<!-- Error reading file: {e} -->"
+                snippet = content[:500]  # first 500 characters as a summary
+                xml_files.append({"filename": rel_path, "snippet": snippet})
+    return xml_files
+
+
+def build_ir(input_dir: str) -> Dict[str, Any]:
+    """
+    Combines the IR from .cs files and XML files.
+    """
+    ir = {
+        "cs_files": parse_cs_files(input_dir),
+        "xml_files": parse_xml_files(input_dir),
+    }
     return ir
 
 
-def read_raw_dotnet_sources(input_dir: str) -> str:
+def read_raw_project_sources(input_dir: str) -> str:
     """
-    Concatenates the raw text of all .cs files with file markers.
+    Concatenates the raw text of all .cs and .xml files with file markers.
     """
     blocks = []
     for root, dirs, files in os.walk(input_dir):
         for f in files:
-            if f.endswith(".cs"):
+            if f.endswith((".cs", ".xml")):
                 full_path = os.path.join(root, f)
                 rel_path = os.path.relpath(full_path, input_dir)
                 try:
@@ -457,15 +456,15 @@ def main():
         sys.exit(1)
     os.makedirs(output_dir, exist_ok=True)
 
-    print("[INFO] Parsing .cs files to build the IR...")
-    ir_data = parse_dotnet_files(input_dir)
+    print("[INFO] Building Intermediate Representation (IR) from .cs and XML files...")
+    ir_data = build_ir(input_dir)
 
-    print("[INFO] Reading raw .cs source files...")
-    raw_dotnet = read_raw_dotnet_sources(input_dir)
+    print("[INFO] Reading raw project source files (.cs and .xml)...")
+    raw_project = read_raw_project_sources(input_dir)
 
     print("[INFO] Starting multi-pass conversion process. This may take some time...")
     final_code = multi_pass_conversion(
-        ir_data, raw_dotnet, temperature=0.0, max_tokens=MAX_TOKENS
+        ir_data, raw_project, temperature=0.0, max_tokens=MAX_TOKENS
     )
 
     if not final_code.strip():
