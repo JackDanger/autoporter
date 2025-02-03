@@ -40,6 +40,7 @@ from typing import List, Dict, Any
 OPENAI_MODEL = "o1-preview"  # Use your preferred model name here
 GEMINI_MODEL = "gemini-2.0-flash-exp"
 DEEPSEEK_MODEL = "deepseek-reasoner"
+VLLM_MODEL = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
 
 openai_api_key = os.environ.get("OPENAI_API_KEY", "")
 gemini_api_key = os.environ.get("GEMINI_API_KEY", "")
@@ -67,6 +68,22 @@ if gemini_api_key:
     gemini_model_instance = genai.GenerativeModel(model_name=GEMINI_MODEL)
 
 
+# Import and initialize vLLM if available
+vllm_client = None
+try:
+    from vllm import LLMEngine
+    from vllm.executors import UniProcExecutor
+    from vllm import SamplingParams
+
+    # Initialize the vLLM engine with the local model named "ok"
+    vllm_client = LLMEngine(VLLM_MODEL, executor_class=UniProcExecutor, log_stats=False)
+    print(vllm_client)
+except ImportError:
+    print("[WARN] vllm module not installed; vLLM calls will not work.")
+except Exception as e:
+    print(f"[WARN] vLLM initialization failed: {e}")
+
+
 if gemini_api_key:
     MAX_TOKENS = 800000
     MAX_CHUNK_SIZE = 500000
@@ -76,6 +93,10 @@ elif deepseek_api_key:
 elif openai_api_key:
     MAX_TOKENS = 5000
     MAX_CHUNK_SIZE = 200000
+else:
+    # If no API key is provided, vLLM may be the only option.
+    MAX_TOKENS = 20000
+    MAX_CHUNK_SIZE = 50000
 
 
 # ----------------------------------------------------------------------
@@ -267,6 +288,10 @@ def call_llm_system_user(
         return call_openai_chat_completion(
             DEEPSEEK_MODEL, messages, temperature=temperature, max_tokens=max_tokens
         )
+    elif vllm_client is not None:
+        return call_vllm(
+            combined_prompt, temperature=temperature, max_tokens=max_tokens
+        )
     else:
         print("[ERROR] No valid API key provided for any supported LLM provider.")
         sys.exit(1)
@@ -329,6 +354,27 @@ def call_gemini(prompt: str, temperature=0.0) -> str:
     return ""
 
 
+def call_vllm(prompt: str, temperature=0.0, max_tokens=3000) -> str:
+    """
+    Call the vLLM local model using the vLLM package.
+    """
+    if vllm_client is None:
+        print("[ERROR] vLLM client not initialized.")
+        return ""
+    try:
+        sampling_params = SamplingParams(temperature=temperature, max_tokens=max_tokens)
+        print("[INFO] Contacting local vLLM model ... Please wait.")
+        results = vllm_client.infer(prompt, sampling_params)
+        # Assuming results is an iterable of responses with an attribute 'text'
+        full_output = ""
+        for res in results:
+            full_output += res.text
+        return full_output
+    except Exception as e:
+        print(f"[ERROR] vLLM API call failed: {e}")
+        return ""
+
+
 def chunk_text(text: str, max_chunk_size: int = 12000) -> List[str]:
     """
     Splits text into chunks not exceeding max_chunk_size characters.
@@ -382,22 +428,37 @@ CONVERSION_PASSES = [
 
 
 def multi_pass_conversion(
-    ir: Dict[str, Any], raw_project: str, temperature=0.0, max_tokens=3000
+    ir: Dict[str, Any],
+    raw_project: str,
+    intermediate_dir: str,
+    temperature=0.0,
+    max_tokens=3000,
 ) -> str:
     """
-    Performs iterative conversion passes with improved chunking.
-    For each conversion pass, the raw project source is split into manageable chunks.
-    Each chunk is processed sequentially, with the accumulated code updated after each chunk.
-    This ensures that large inputs are handled gracefully across multiple passes.
+    Performs iterative conversion passes with robust chunking and intermediate file storage.
+    The raw project source is split into manageable chunks and processed sequentially.
+    After each pass (and after each chunk within a pass), the intermediate output is saved to the specified
+    intermediate directory. This allows you to CTRL-C and resume later, as well as inspect all intermediate analyses.
+
+    Parameters:
+      - ir: The advanced intermediate representation (IR) of the legacy project.
+      - raw_project: The complete raw source (concatenated .cs and .xml files with file markers).
+      - intermediate_dir: Directory where all intermediate outputs and analyses will be stored.
+      - temperature: LLM sampling temperature.
+      - max_tokens: Maximum tokens for LLM responses.
+
+    Returns:
+      - The final accumulated Python codebase as a single string.
     """
-    accumulated_code = ""
-    # Split the raw project source into manageable chunks.
-    project_chunks = chunk_text(raw_project, max_chunk_size=MAX_CHUNK_SIZE)
-    dep_summary = dependency_graph_summary(ir)
+
+    # Ensure intermediate directory exists.
+    os.makedirs(intermediate_dir, exist_ok=True)
+
+    # Write IR summary for inspection.
     ir_summary = json.dumps(
         {
             "metrics": ir.get("metrics", {}),
-            "dependency_graph": dep_summary,
+            "dependency_graph": dependency_graph_summary(ir),
             "cs_files": [
                 {"filename": f["filename"], "types": [t["name"] for t in f["types"]]}
                 for f in ir.get("cs_files", [])
@@ -409,44 +470,68 @@ def multi_pass_conversion(
         },
         indent=2,
     )
+    with open(
+        os.path.join(intermediate_dir, "ir_summary.json"), "w", encoding="utf-8"
+    ) as f:
+        f.write(ir_summary)
 
+    # Split the raw project source into chunks.
+    project_chunks = chunk_text(raw_project, max_chunk_size=MAX_CHUNK_SIZE)
+
+    accumulated_code = ""
+    # Iterate over each conversion pass.
     for pass_idx, (pass_name, pass_obj) in enumerate(CONVERSION_PASSES, start=1):
         print(f"[INFO] Starting pass {pass_idx}: {pass_name} ...")
-        pass_accumulated_code = (
-            accumulated_code  # Start with the code from previous passes.
+        # Define an intermediate file for this pass.
+        pass_filename = os.path.join(
+            intermediate_dir, f"pass_{pass_idx}_{pass_name.replace(' ', '_')}.txt"
         )
-        # Process each chunk sequentially in this conversion pass.
-        for chunk_idx, chunk in enumerate(project_chunks, start=1):
-            user_prompt = (
-                f"=== Conversion Pass {pass_idx}: {pass_name} (Chunk {chunk_idx}/{len(project_chunks)}) ===\n\n"
-                f"Objective: {pass_obj}\n\n"
-                "Intermediate Representation (IR):\n"
-                f"{ir_summary}\n\n"
-                "Dependency Summary:\n"
-                f"{dep_summary}\n\n"
-                "Raw Project Source (current chunk):\n"
-                f"{chunk}\n\n"
-                "Python code generated so far for this pass:\n"
-                "-------------------------\n"
-                f"{pass_accumulated_code}\n"
-                "-------------------------\n\n"
-                "Please update and extend the code to meet the objective of this pass for this chunk. "
-                "Output the entire updated codebase using the following file marker format:\n"
-                "# filename: relative/path/to/file\n"
-                "<file contents>\n\n"
-                "Ensure nothing is omitted (configuration, SQL queries, business logic, Dockerfile, etc.)."
-            )
-            chunk_result = call_llm_system_user(
-                "", user_prompt, temperature=temperature, max_tokens=max_tokens
-            )
-            if chunk_result.strip():
-                pass_accumulated_code = chunk_result
-            else:
-                print(
-                    f"[WARN] Pass {pass_idx} chunk {chunk_idx} returned empty result; retaining previous code."
+        # If the intermediate file exists, load it to resume; otherwise, start with previous code.
+        if os.path.exists(pass_filename):
+            print(f"[INFO] Found intermediate file for pass {pass_idx}, loading...")
+            with open(pass_filename, "r", encoding="utf-8") as f:
+                pass_accumulated_code = f.read()
+        else:
+            pass_accumulated_code = accumulated_code
+            # Process each chunk sequentially for the current pass.
+            for chunk_idx, chunk in enumerate(project_chunks, start=1):
+                user_prompt = (
+                    f"=== Conversion Pass {pass_idx}: {pass_name} (Chunk {chunk_idx}/{len(project_chunks)}) ===\n\n"
+                    f"Objective: {pass_obj}\n\n"
+                    "Intermediate Representation (IR):\n"
+                    f"{ir_summary}\n\n"
+                    "Raw Project Source (current chunk):\n"
+                    f"{chunk}\n\n"
+                    "Python code generated so far for this pass:\n"
+                    "-------------------------\n"
+                    f"{pass_accumulated_code}\n"
+                    "-------------------------\n\n"
+                    "Please update and extend the code to meet the objective of this pass for this chunk. "
+                    "Output the entire updated codebase using the following file marker format:\n"
+                    "# filename: relative/path/to/file\n"
+                    "<file contents>\n\n"
+                    "Ensure nothing is omitted (configuration, SQL queries, business logic, Dockerfile, etc.)."
                 )
+                chunk_result = call_llm_system_user(
+                    "", user_prompt, temperature=temperature, max_tokens=max_tokens
+                )
+                if chunk_result.strip():
+                    pass_accumulated_code = chunk_result
+                    # Save intermediate result after processing each chunk.
+                    with open(pass_filename, "w", encoding="utf-8") as f:
+                        f.write(pass_accumulated_code)
+                else:
+                    print(
+                        f"[WARN] Pass {pass_idx} chunk {chunk_idx} returned empty result; retaining previous code."
+                    )
         # After processing all chunks for this pass, update the overall accumulated code.
         accumulated_code = pass_accumulated_code
+        # Also, save the overall accumulated code for this pass for later inspection.
+        overall_filename = os.path.join(
+            intermediate_dir, f"overall_after_pass_{pass_idx}.txt"
+        )
+        with open(overall_filename, "w", encoding="utf-8") as f:
+            f.write(accumulated_code)
     return accumulated_code
 
 
@@ -501,6 +586,9 @@ def main():
         print(f"[ERROR] '{input_dir}' is not a directory or does not exist.")
         sys.exit(1)
     os.makedirs(output_dir, exist_ok=True)
+
+    intermediate_dir = os.path.join(output_dir, '_intermediate_files')
+    os.makedirs(intermediate_dir, exist_ok=True)
 
     print("[INFO] Building advanced IR from .cs and .xml files...")
     ir_data = build_advanced_ir(input_dir)
