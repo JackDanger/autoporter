@@ -1,26 +1,30 @@
 #!/usr/bin/env python3
 """
-A script to parse a legacy 2018-era .NET (C#) application and faithfully convert it into
-a modern, Dockerized ASP.NET Core application using:
-  - ASP.NET Core for web endpoints
-  - Entity Framework Core for ORM/data access
-  - xUnit for testing
+A conversion tool to transform legacy 2018-era .NET (C#) applications into a modern Python codebase
+using FastAPI, SQLAlchemy, Alembic, pytest, and the blueprint architecture. In addition, it generates
+a working Dockerfile.
 
-Key Points:
-1. We parse the .cs files with a custom regex-based parser to build an intermediate representation (IR).
-2. We gather the entire raw .cs source code (with file markers) so the LLM has both structural and textual info.
-3. We feed the IR plus raw code to the LLM, asking it to produce a *complete* modern ASP.NET Core codebase.
-4. We carefully split files from the LLM output and write them to the specified output directory.
-5. The generated code must include a Dockerfile (and docker-compose.yml if needed) plus comprehensive unit tests.
+This tool runs multiple conversion passes to capture:
+  - Database models and migrations
+  - HTTP endpoints and controllers
+  - Business logic including authentication, credentials, HTML/text templating, email delivery,
+    service-to-service calls, and database queries
+  - Comprehensive unit tests (pytest)
+  - Docker containerization
+
+High-level strategies include:
+  - Building an advanced IR (with rudimentary dependency graph analysis)
+  - Iterative multi-pass LLM conversion (each pass focusing on one area)
+  - Chunking large inputs to avoid token limits
+  - Merging and consolidating code over many iterations
 
 Usage:
-    python convert_dotnet_app.py <input_directory> <output_directory>
+    python convert_dotnet_to_python.py <input_directory> <output_directory>
 
 Environment Variables:
-    OPENAI_API_KEY: (optional) Your OpenAI API key if you want to call the OpenAI Chat API.
-    GEMINI_API_KEY: (optional) Your Google PaLM (Gemini) API key if you want to call PaLM instead.
-                    If both keys are present, we'll default to OpenAI for now.
-    DEEPSEEK_API_KEY: (optional) Your DeepSeek API key if you want to use the DeepSeek model.
+    OPENAI_API_KEY: Your OpenAI API key (optional)
+    GEMINI_API_KEY: Your Google PaLM (Gemini) API key (optional)
+    DEEPSEEK_API_KEY: Your DeepSeek API key (optional)
 
 Requirements:
     pip install openai google-generativeai
@@ -33,33 +37,30 @@ import time
 from typing import List, Dict, Any
 
 # ----------------------------------------------------------------------
-# LLM / Model Config
+# LLM / Model Configuration
 # ----------------------------------------------------------------------
-OPENAI_MODEL = "o3-mini"  # or your chosen OpenAI model name
-GEMINI_MODEL = "gemini-2.0-flash-exp"  # example
+OPENAI_MODEL = "o1-preview"  # or your preferred OpenAI model name
+GEMINI_MODEL = "gemini-2.0-flash-exp"  # example model name
 DEEPSEEK_MODEL = "deepseek-reasoner"
 
 openai_api_key = os.environ.get("OPENAI_API_KEY", "")
-deepseek_api_key = os.environ.get("DEEPSEEK_API_KEY", "")
 gemini_api_key = os.environ.get("GEMINI_API_KEY", "")
+deepseek_api_key = os.environ.get("DEEPSEEK_API_KEY", "")
 
-# Import OpenAI libraries if available
+# Import OpenAI
 try:
-    from openai import OpenAI
-
-    client = OpenAI(api_key=openai_api_key)
+    import openai
 except ImportError:
     print("[ERROR] Please install openai: pip install openai")
     sys.exit(1)
+openai.api_key = openai_api_key
 
-# Setup OpenAI client instance(s)
-
-# Import Google Generative AI if available
+# Import Gemini (Google Generative AI) if available
 try:
     import google.generativeai as genai
 except ImportError:
     print(
-        "[WARN] google-generativeai module not installed. Gemini calls will fail if selected."
+        "[WARN] google-generativeai module not installed; Gemini calls will not work."
     )
 genai.configure(api_key=gemini_api_key)
 gemini_model_instance = None
@@ -67,56 +68,61 @@ if gemini_api_key:
     gemini_model_instance = genai.GenerativeModel(model_name=GEMINI_MODEL)
 
 # ----------------------------------------------------------------------
-# Prompts
+# System Prompt and Multi-Pass Objectives
 # ----------------------------------------------------------------------
+SYSTEM_PROMPT = (
+    "You are an expert software engineer with deep experience converting legacy .NET (C#) applications "
+    "into modern Python applications using FastAPI, SQLAlchemy, Alembic, pytest, and the blueprint architecture. \n"
+    "Your output must capture all key aspects including database models/migrations, HTTP endpoints, business logic, "
+    "authentication and credentials, HTML/text templating, email delivery, service-to-service calls, and database queries. \n"
+    "Additionally, you must produce a working Dockerfile and container configuration. \n"
+    "Adhere strictly to best practices, PEP8 standards, and produce code that is modular, maintainable, and cohesive. \n"
+    "Include inline comments where necessary and produce each output file prefixed by '# filename: <relative/path>'."
+)
 
-SYSTEM_PROMPT = """You are a world-class software engineer with deep expertise in both legacy .NET Framework (circa 2018)
-and modern ASP.NET Core development. You convert legacy C# code (including classes, interfaces, structs, methods, properties, fields, etc.)
-into a fully modern, Dockerized ASP.NET Core application. Your target application must include:
-- A proper ASP.NET Core project (with Program.cs and Startup.cs or minimal hosting setup)
-- A clean separation of Controllers, Models, Services, and Data (using Entity Framework Core)
-- A Dockerfile (and docker-compose.yml if needed) to containerize the application
-- Comprehensive unit tests using xUnit that carefully cover all discovered functionality
-- All best practices for modern C# and ASP.NET Core development
-
-Preserve all business logic, inline comments, and structure from the legacy source. If any logic is unclear, add clarifying comments.
-Output all necessary files in the format specified below.
-"""
-
-USER_PROMPT_TEMPLATE = """Below is an intermediate representation (IR) of the entire legacy .NET (C#) codebase
-(parsed from the .cs files) and, following that, the *raw text* of each .cs file.
-
-Your goal:
-1. Faithfully convert *all* logic, data structures, classes, interfaces, methods, properties, fields, etc.
-   into a single coherent, modern ASP.NET Core application.
-2. Use the recommended file structure:
-    src/
-      MyApp.csproj
-      Program.cs
-      Startup.cs (or equivalent)
-      Controllers/
-      Models/
-      Data/
-      Services/
-    tests/
-      MyApp.Tests.csproj (with unit tests using xUnit)
-    Dockerfile
-    docker-compose.yml (if needed)
-    README.md
-3. Include unit tests that thoroughly verify every piece of functionality discovered in the source app.
-4. Do not skip any logic—even if parts seem disconnected—convert them into appropriate modules.
-5. The final output must include *all* necessary files, separated by the format:
-   # filename: relative/path/to/file
-   <contents>
-
-First, here is the IR (JSON-like structure):
-{ir}
-
-Next, here is the entire raw .NET source code (with file markers):
-{raw_dotnet_sources}
-
-Please now produce the complete modern ASP.NET Core codebase accordingly.
-"""
+# Define a list of conversion passes with detailed objectives.
+CONVERSION_PASSES = [
+    (
+        "Base Conversion",
+        "Convert the legacy .NET application into a basic Python codebase using FastAPI with a blueprint architecture. "
+        "Extract general business logic and create a preliminary structure including initial controllers and modules.",
+    ),
+    (
+        "Database Models & Migrations",
+        "Analyze and extract all database-related logic from the .NET code. Convert database models into SQLAlchemy models "
+        "and generate Alembic migration scripts capturing schema changes.",
+    ),
+    (
+        "HTTP Endpoints & Controllers",
+        "Identify and convert all HTTP endpoints and controllers from the legacy code into FastAPI routers. "
+        "Ensure proper separation of concerns between routes and business logic.",
+    ),
+    (
+        "Authentication, Templating & Email Delivery",
+        "Extract logic related to authentication, credential management, HTML and text templating, and email delivery. "
+        "Convert these into idiomatic Python code using standard libraries and best practices.",
+    ),
+    (
+        "Service-to-Service Calls & Database Queries",
+        "Convert any service-to-service calls and complex database queries from the .NET application into asynchronous "
+        "HTTP calls and robust SQLAlchemy query logic.",
+    ),
+    (
+        "Unit Tests",
+        "Generate a comprehensive suite of unit tests using pytest that covers all the functionality converted so far. "
+        "Ensure tests are organized per module and cover edge cases and business logic.",
+    ),
+    (
+        "Dockerization",
+        "Generate a working Dockerfile (and docker-compose.yml if necessary) that containerizes the entire Python application. "
+        "Ensure that environment variables and dependency installations are properly configured.",
+    ),
+    (
+        "Final Consolidation",
+        "Perform a final pass that consolidates all previous changes into a cohesive, consistent codebase. "
+        "Refine the structure, resolve any dependency issues, and ensure overall code quality and adherence to best practices.",
+    ),
+]
 
 
 # ----------------------------------------------------------------------
@@ -126,12 +132,11 @@ def call_llm_system_user(
     system_prompt: str, user_prompt: str, temperature=0.0, max_tokens=8000
 ) -> str:
     """
-    Calls the LLM with a system prompt and a user prompt using OpenAI if available,
-    otherwise uses Gemini. Returns the LLM response text.
+    Calls the LLM with a system and a user prompt using OpenAI if available,
+    otherwise falls back to Gemini or DeepSeek.
     """
     combined_prompt = f"{system_prompt}\n\n{user_prompt}"
     if openai_api_key:
-        # For OpenAI Chat API models that require system + user messages
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -161,16 +166,18 @@ def call_openai_chat_completion(
     max_tokens: int = None,
 ) -> str:
     """
-    Call an OpenAI-compatible Chat Completion endpoint.
+    Call the OpenAI Chat Completion endpoint.
     """
     print("[INFO] Contacting Chat Completion API... Please wait.")
     try:
         if model_name in ["o1-preview", "deepseek-reasoner"]:
-            response = client.chat.completions.create(
-                model=model_name, messages=messages, temperature=temperature
+            response = openai.ChatCompletion.create(
+                model=model_name,
+                messages=messages,
+                temperature=temperature,
             )
         else:
-            response = client.chat.completions.create(
+            response = openai.ChatCompletion.create(
                 model=model_name,
                 messages=messages,
                 temperature=temperature,
@@ -184,13 +191,13 @@ def call_openai_chat_completion(
 
 def call_gemini(prompt: str, temperature=0.0) -> str:
     """
-    Call the Gemini API for generation.
+    Call the Gemini (Google PaLM) API for generation.
     """
     max_retries = 15
-    retry_delay = 1  # in seconds
+    retry_delay = 1  # seconds
     for attempt in range(max_retries):
         try:
-            print("[INFO] Contacting Google Gemini... Please wait.")
+            print("[INFO] Contacting Google PaLM API (Gemini)... Please wait.")
             response = gemini_model_instance.generate_content(
                 prompt,
                 generation_config=genai.types.GenerationConfig(
@@ -204,18 +211,16 @@ def call_gemini(prompt: str, temperature=0.0) -> str:
                 chunks += chunk.text
             return chunks
         except Exception as e:
-            print(
-                f"[WARN] Error generating response: {e}. Retrying in {retry_delay} seconds..."
-            )
+            print(f"[WARN] Gemini error: {e}. Retrying in {retry_delay} seconds...")
             time.sleep(retry_delay)
             retry_delay *= 2  # exponential backoff
-    print("[ERROR] Failed to get a valid response from Google Gemini.")
+    print("[ERROR] Failed to get a valid response from Gemini.")
     return ""
 
 
 def chunk_text(text: str, max_chunk_size: int = 12000) -> List[str]:
     """
-    Split a large string into multiple pieces, each at most `max_chunk_size` characters.
+    Splits a large text into chunks not exceeding max_chunk_size.
     """
     chunks = []
     start = 0
@@ -227,83 +232,96 @@ def chunk_text(text: str, max_chunk_size: int = 12000) -> List[str]:
     return chunks
 
 
-def chunk_and_call_llm(
-    ir_data: dict, raw_dotnet: str, system_prompt: str, temperature=0.0, max_tokens=3000
+# ----------------------------------------------------------------------
+# Multi-Pass Conversion Functionality
+# ----------------------------------------------------------------------
+def multi_pass_conversion(
+    ir_data: dict, raw_dotnet: str, temperature=0.0, max_tokens=3000
 ) -> str:
     """
-    Break the raw .NET source into manageable chunks, then iteratively call the LLM,
-    carrying forward partial code so everything is eventually addressed with proper context.
+    Performs multiple iterative passes over the legacy .NET code to incrementally convert it
+    into a modern Python codebase. Each pass refines a different aspect of the conversion.
     """
-    dotnet_chunks = chunk_text(raw_dotnet, max_chunk_size=10000)  # adjust if needed
-    accumulated_code = ""  # this stores the code generated so far
-    for i, chunk in enumerate(dotnet_chunks):
-        user_prompt = f"""
-You have the following Intermediate Representation (IR) of the .NET codebase:
-{repr(ir_data)}
+    # Start with an empty accumulated code base.
+    accumulated_code = ""
 
-Below is the partial code you've generated so far (accumulated):
-\"\"\"
-{accumulated_code}
-\"\"\"
+    # For very large raw sources, break into chunks for context.
+    dotnet_chunks = chunk_text(raw_dotnet, max_chunk_size=10000)
+    context_source = "\n".join(
+        dotnet_chunks
+    )  # You might choose to refine per-pass chunking
 
-Now, here is a chunk of the raw .NET source code we haven't processed yet:
-\"\"\"
-{chunk}
-\"\"\"
-
-Please update or extend the code so that it incorporates everything in this chunk without losing previously converted logic.
-If classes, methods, or modules already converted need to be refined, refine them.
-If new logic appears, incorporate it.
-Output all of your updated code using the format:
-# filename: relative/path/to/file
-<contents>
-
-Ensure that the final codebase is complete, cohesive, and follows the modern ASP.NET Core project structure with Dockerization and unit tests.
-"""
-        print(f"[INFO] Processing chunk {i+1} / {len(dotnet_chunks)}...")
-        updated_code = call_llm_system_user(
-            system_prompt, user_prompt, temperature=temperature, max_tokens=max_tokens
+    # Iterate over the defined conversion passes.
+    for pass_index, (pass_name, pass_objective) in enumerate(
+        CONVERSION_PASSES, start=1
+    ):
+        user_prompt = (
+            f"=== Conversion Pass {pass_index}: {pass_name} ===\n\n"
+            f"Objective: {pass_objective}\n\n"
+            "Below is the Intermediate Representation (IR) of the legacy .NET codebase:\n"
+            f"{repr(ir_data)}\n\n"
+            "Below is the complete raw .NET source code (with file markers):\n"
+            f"{context_source}\n\n"
+            "The Python code generated so far is as follows:\n"
+            "-------------------------\n"
+            f"{accumulated_code}\n"
+            "-------------------------\n\n"
+            "Please update and extend the code to address the above objective for this pass. "
+            "If necessary, refine previously generated logic, add new modules, endpoints, models, "
+            "tests, or configuration files. Output all of your updated code using the format:\n"
+            "# filename: relative/path/to/file\n"
+            "<file contents>\n\n"
+            "Do not omit any functionality; ensure that the final result includes proper handling "
+            "for database models, migrations, HTTP endpoints, authentication, templating, email delivery, "
+            "service-to-service calls, database queries, unit tests, and a working Dockerfile."
         )
-        if updated_code.strip():
-            accumulated_code = updated_code
+        print(f"[INFO] Starting pass {pass_index}: {pass_name} ...")
+        # Call the LLM with the system prompt and current pass objective
+        pass_result = call_llm_system_user(
+            SYSTEM_PROMPT, user_prompt, temperature=temperature, max_tokens=max_tokens
+        )
+        if pass_result.strip():
+            accumulated_code = pass_result  # Replace previous code with refined version
         else:
             print(
-                "[WARN] Received empty response for this chunk; retaining previously generated code."
+                f"[WARN] Pass {pass_index} returned empty result; retaining previous code."
             )
+
     return accumulated_code
 
 
 # ----------------------------------------------------------------------
-# .NET (C#) Parsing / IR Construction
+# .NET (C#) Parsing / Advanced IR Construction
 # ----------------------------------------------------------------------
 def parse_dotnet_files(input_dir: str) -> Dict[str, Any]:
     """
-    Walks through the input directory to find all .cs files and builds an intermediate
-    representation (IR) that summarizes classes, interfaces, structs, methods, properties, and fields.
+    Parses all .cs files in the input directory to build an advanced IR.
+    The IR includes classes, interfaces, methods, properties, fields, and uses simple heuristics
+    to capture potential dependency information (for use in multi-pass conversion).
 
-    The IR will have the structure:
-
-    {
-      "files": [
-         {
-           "filename": "relative/path/to/file.cs",
-           "types": [
-              {
-                "name": <name>,
-                "type": "class" | "interface" | "struct",
-                "methods": [<method names>],
-                "properties": [<property names>],
-                "fields": [<field names>],
-              },
-              ...
-           ]
-         },
-         ...
-      ]
-    }
+    The structure is:
+      {
+        "files": [
+           {
+             "filename": "relative/path/to/file.cs",
+             "types": [
+                {
+                  "name": <name>,
+                  "type": "class" | "interface" | "struct",
+                  "methods": [<method names>],
+                  "properties": [<property names>],
+                  "fields": [<field names>],
+                  "dependencies": [<other types referenced>]
+                },
+                ...
+             ]
+           },
+           ...
+        ]
+      }
     """
     ir = {"files": []}
-    # Regex patterns (very simple; may not catch all edge cases in messy legacy code)
+    # Simple regex patterns for types, methods, properties, and fields.
     type_pattern = re.compile(
         r"\b(public|internal|private|protected)?\s*(partial\s+)?(class|interface|struct)\s+(\w+)",
         re.MULTILINE,
@@ -326,12 +344,14 @@ def parse_dotnet_files(input_dir: str) -> Dict[str, Any]:
             if f.endswith(".cs"):
                 full_path = os.path.join(root, f)
                 rel_path = os.path.relpath(full_path, input_dir)
-                with open(
-                    full_path, "r", encoding="utf-8", errors="ignore"
-                ) as src_file:
-                    content = src_file.read()
+                try:
+                    with open(
+                        full_path, "r", encoding="utf-8", errors="ignore"
+                    ) as src_file:
+                        content = src_file.read()
+                except Exception as e:
+                    content = f"// Error reading file: {e}"
                 file_ir = {"filename": rel_path, "types": []}
-
                 for match in type_pattern.finditer(content):
                     access, partial, typ, name = match.groups()
                     type_info = {
@@ -340,17 +360,15 @@ def parse_dotnet_files(input_dir: str) -> Dict[str, Any]:
                         "methods": [],
                         "properties": [],
                         "fields": [],
+                        "dependencies": [],  # We could later use call graphs to populate this
                     }
-                    # Methods inside the type (simple scan of the entire file)
+                    # Search for methods, properties, and fields within the file (simple heuristic)
                     for m in method_pattern.finditer(content):
-                        # A simple heuristic: if the method appears after the type definition
                         if m.start() > match.end():
                             type_info["methods"].append(m.group(4))
-                    # Properties
                     for p in property_pattern.finditer(content):
                         if p.start() > match.end():
                             type_info["properties"].append(p.group(3))
-                    # Fields
                     for fmatch in field_pattern.finditer(content):
                         if fmatch.start() > match.end():
                             type_info["fields"].append(fmatch.group(3))
@@ -361,7 +379,7 @@ def parse_dotnet_files(input_dir: str) -> Dict[str, Any]:
 
 def read_raw_dotnet_sources(input_dir: str) -> str:
     """
-    Concatenates the raw text of all .cs files, separated by markers.
+    Concatenates the raw text of all .cs files with file markers.
     """
     blocks = []
     for root, dirs, files in os.walk(input_dir):
@@ -381,14 +399,12 @@ def read_raw_dotnet_sources(input_dir: str) -> str:
 
 
 # ----------------------------------------------------------------------
-# Output Parsing / Writing
+# Output Splitting and Writing
 # ----------------------------------------------------------------------
 def split_and_write_files(llm_output: str, output_dir: str):
     """
-    Splits the LLM output based on lines starting with "# filename: " and writes each file
-    to the correct location under the output directory.
+    Splits the LLM output by lines starting with "# filename:" and writes each file to disk.
     """
-    # We allow any file name (with or without extension) after "# filename: "
     file_pattern = re.compile(r"^# filename:\s+(.+)$")
     current_file = None
     content_lines = []
@@ -411,7 +427,6 @@ def split_and_write_files(llm_output: str, output_dir: str):
         else:
             if current_file is not None:
                 content_lines.append(line + "\n")
-    # Write the last file if needed
     if current_file and content_lines:
         write_file(current_file, content_lines)
 
@@ -422,7 +437,7 @@ def split_and_write_files(llm_output: str, output_dir: str):
 def main():
     if len(sys.argv) != 3:
         print(
-            "Usage: python convert_dotnet_app.py <input_directory> <output_directory>"
+            "Usage: python convert_dotnet_to_python.py <input_directory> <output_directory>"
         )
         sys.exit(1)
 
@@ -434,40 +449,28 @@ def main():
         sys.exit(1)
     os.makedirs(output_dir, exist_ok=True)
 
-    # 1) Build IR from the .cs files
-    print("[INFO] Parsing .cs files to build IR...")
+    print("[INFO] Parsing .cs files to build the IR...")
     ir_data = parse_dotnet_files(input_dir)
 
-    # 2) Read raw .NET source code
-    print("[INFO] Reading raw .cs sources...")
+    print("[INFO] Reading raw .cs source files...")
     raw_dotnet = read_raw_dotnet_sources(input_dir)
 
-    # 3) Construct the user prompt using the updated template
-    user_prompt = USER_PROMPT_TEMPLATE.format(
-        ir=repr(ir_data), raw_dotnet_sources=raw_dotnet
+    print("[INFO] Starting multi-pass conversion process. This may take some time...")
+    final_code = multi_pass_conversion(
+        ir_data, raw_dotnet, temperature=0.0, max_tokens=3000
     )
 
-    # 4) Call the LLM in a chunked fashion
-    print(
-        "[INFO] Generating modern ASP.NET Core codebase from legacy .NET sources (this may take a while)..."
-    )
-    llm_output = chunk_and_call_llm(
-        ir_data=ir_data,
-        raw_dotnet=raw_dotnet,
-        system_prompt=SYSTEM_PROMPT,
-        temperature=0.0,
-        max_tokens=3000,
-    )
-    if not llm_output.strip():
-        print("[ERROR] LLM returned an empty response. Exiting.")
+    if not final_code.strip():
+        print("[ERROR] The LLM returned an empty result. Exiting.")
         sys.exit(1)
 
-    # 5) Write the resulting files to disk
-    print("[INFO] Writing output files to disk...")
-    split_and_write_files(llm_output, output_dir)
+    print(
+        "[INFO] Splitting the final code into files and writing to output directory..."
+    )
+    split_and_write_files(final_code, output_dir)
 
     print(
-        "\n[INFO] Conversion complete! Check the output directory for your modern ASP.NET Core codebase."
+        "\n[INFO] Conversion complete! Please check the output directory for your modern Python codebase."
     )
 
 
