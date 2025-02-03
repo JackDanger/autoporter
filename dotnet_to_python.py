@@ -68,11 +68,14 @@ if gemini_api_key:
 
 
 if gemini_api_key:
-    MAX_TOKENS = 50000
+    MAX_TOKENS = 800000
+    MAX_CHUNK_SIZE = 500000
 elif deepseek_api_key:
     MAX_TOKENS = 5000
+    MAX_CHUNK_SIZE = 200000
 elif openai_api_key:
     MAX_TOKENS = 5000
+    MAX_CHUNK_SIZE = 200000
 
 
 # ----------------------------------------------------------------------
@@ -282,7 +285,7 @@ def call_openai_chat_completion(
     try:
         if model_name in ["o1-preview", "deepseek-reasoner"]:
             response = client.chat.completions.create(
-                model=model_name, messages=messages, temperature=temperature
+                model=model_name, messages=messages
             )
         else:
             response = client.chat.completions.create(
@@ -389,7 +392,7 @@ def multi_pass_conversion(
     """
     accumulated_code = ""
     # Split the raw project source into manageable chunks.
-    project_chunks = chunk_text(raw_project, max_chunk_size=10000)
+    project_chunks = chunk_text(raw_project, max_chunk_size=MAX_CHUNK_SIZE)
     dep_summary = dependency_graph_summary(ir)
     ir_summary = json.dumps(
         {
