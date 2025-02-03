@@ -67,6 +67,14 @@ gemini_model_instance = None
 if gemini_api_key:
     gemini_model_instance = genai.GenerativeModel(model_name=GEMINI_MODEL)
 
+if gemini_api_key:
+    MAX_TOKENS = 800000
+elif deepseek_api_key:
+    MAX_TOKENS = 5000
+elif openai_api_key:
+    MAX_TOKENS = 5000
+
+
 # ----------------------------------------------------------------------
 # System Prompt and Multi-Pass Objectives
 # ----------------------------------------------------------------------
@@ -457,7 +465,7 @@ def main():
 
     print("[INFO] Starting multi-pass conversion process. This may take some time...")
     final_code = multi_pass_conversion(
-        ir_data, raw_dotnet, temperature=0.0, max_tokens=3000
+        ir_data, raw_dotnet, temperature=0.0, max_tokens=MAX_TOKENS
     )
 
     if not final_code.strip():
