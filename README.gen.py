@@ -1,411 +1,403 @@
 #!/usr/bin/env python3
 """
-Analyze a code repository using a single LLM pass per file.
+Example script that analyzes a Git repository and outputs a basic README draft to stdout,
+using an LLM for text generation.
 
-Goals:
-- For each file that looks like source code, send its entire contents to the LLM once.
-- The LLM returns a structured JSON with fields:
-  {
-    "endpoints": [... or "No relevant info"],
-    "db_schema": [... or "No relevant info"],
-    "external_calls": [... or "No relevant info"],
-    "language": "..." or "unknown",
-    "summary": "..." or "No relevant info"
-  }
+Usage:
+    python analyze_git_repo.py <repo_path>
 
-We then aggregate these results:
-- endpoints to http_endpoints.txt
-- db schema info to db_schema.dot (one combined graph)
-- third-party calls to third_party_calls.txt
-- a final README.gen summarizing all.
-
-We implement a heuristic function identify_structure() that determines if a file is code or not.
-We do not attempt directory filtering. We analyze all code files.
-
-We add exponential backoff for rate-limit errors as before.
+Environment Variables (same as the advanced script):
+    OPENAI_API_KEY: Your OpenAI API key (optional)
+    GEMINI_API_KEY: Your Google PaLM (Gemini) API key (optional)
+    DEEPSEEK_API_KEY: Your DeepSeek API key (optional)
 """
 
 import os
 import sys
-import traceback
-import time
-import json
-import re
-from tqdm import tqdm
-from google import genai
-from openai import OpenAI
+import subprocess
+from typing import List, Dict, Any
 
-MAX_RETRIES = 3
+# ----------------------------------------------------------------------
+# LLM / Model Configuration
+# (Identical or very similar to your original script)
+# ----------------------------------------------------------------------
+OPENAI_MODEL = "o1-preview"  # or your preferred model
+GEMINI_MODEL = "gemini-2.0-flash-exp"
+DEEPSEEK_MODEL = "deepseek-reasoner"
+VLLM_MODEL = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+
+openai_api_key = os.environ.get("OPENAI_API_KEY", "")
+gemini_api_key = os.environ.get("GEMINI_API_KEY", "")
+deepseek_api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+
+# Try importing OpenAI
+try:
+    from openai import OpenAI
+
+    client = OpenAI(api_key=openai_api_key)
+except ImportError:
+    print("[ERROR] Please install openai: pip install openai")
+    client = None
+
+# Try importing Gemini
+try:
+    import google.generativeai as genai
+except ImportError:
+    print(
+        "[WARN] google-generativeai module not installed; Gemini calls will not work."
+    )
+    genai = None
+
+if gemini_api_key and genai:
+    genai.configure(api_key=gemini_api_key)
+    gemini_model_instance = genai.GenerativeModel(model_name=GEMINI_MODEL)
+else:
+    gemini_model_instance = None
+
+# Try initializing vLLM
+vllm_client = None
+try:
+    from vllm import LLMEngine
+    from vllm.executors import UniProcExecutor
+    from vllm import SamplingParams
+
+    vllm_client = LLMEngine(VLLM_MODEL, executor_class=UniProcExecutor, log_stats=False)
+    print("[INFO] Initialized local vLLM engine.")
+except ImportError:
+    print("[WARN] vllm module not installed; vLLM calls will not work.")
+except Exception as e:
+    print(f"[WARN] vLLM initialization failed: {e}")
+
+# Set max tokens
+if gemini_api_key:
+    MAX_TOKENS = 900000
+elif deepseek_api_key:
+    MAX_TOKENS = 5000
+elif openai_api_key:
+    MAX_TOKENS = 5000
+else:
+    MAX_TOKENS = 20000
 
 
-def print_error_and_exit(message):
-    print(f"Error: {message}")
-    sys.exit(1)
+# ----------------------------------------------------------------------
+# LLM Utility Functions
+# ----------------------------------------------------------------------
+def call_llm_system_user(
+    system_prompt: str, user_prompt: str, temperature=0.2, max_tokens=2000
+) -> str:
+    """
+    Calls the LLM with a system prompt and a user prompt using one of the configured providers.
+    """
+    combined_prompt = f"{system_prompt}\n\n{user_prompt}"
 
-
-def init_clients():
-    gemini_key = os.environ.get("GEMINI_API_KEY")
-    openai_token = os.environ.get("OPENAI_API_TOKEN")
-
-    if not gemini_key and not openai_token:
-        print_error_and_exit(
-            "Neither GEMINI_API_KEY nor OPENAI_API_TOKEN is set. "
-            "Please set one before running this script."
+    # 1) Try OpenAI
+    if openai_api_key:
+        # For 'o1-preview' style, you might only supply a user message.
+        if "o1" in OPENAI_MODEL:
+            messages = [
+                {"role": "user", "content": combined_prompt},
+            ]
+        else:
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
+        return call_openai_chat_completion(
+            OPENAI_MODEL,
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
         )
 
-    gemini_client = None
-    #gemini_model_name = 'gemini-2.0-flash-exp'
-    gemini_model_name = 'gemini-1.5-pro'
-    if gemini_key:
-        print("[DEBUG] Initializing Gemini client...")
-        try:
-            gemini_client = genai.Client(api_key=gemini_key)
-        except Exception as e:
-            print_error_and_exit(f"Failed to initialize Gemini client: {str(e)}")
+    # 2) Try Gemini
+    elif gemini_api_key and gemini_model_instance:
+        return call_gemini(combined_prompt, temperature=temperature)
 
-    return gemini_client, gemini_model_name
+    # 3) Try DeepSeek (or fallback to openai style prompt)
+    elif deepseek_api_key:
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        return call_openai_chat_completion(
+            DEEPSEEK_MODEL,
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
 
+    # 4) Local vLLM
+    elif vllm_client is not None:
+        return call_vllm(
+            combined_prompt, temperature=temperature, max_tokens=max_tokens
+        )
 
-def infer(prompt, gemini_client=None, gemini_model_name=None):
-    gemini_key = os.environ.get("GEMINI_API_KEY")
-    openai_token = os.environ.get("OPENAI_API_TOKEN")
-
-    if not gemini_key and not openai_token:
-        print_error_and_exit("Neither GEMINI_API_KEY nor OPENAI_API_TOKEN is set. Cannot proceed.")
-
-    use_gemini = bool(gemini_key)
-    backend_name = "Gemini" if use_gemini else "OpenAI gpt-4o"
-
-    for attempt in range(1, MAX_RETRIES + 1):
-        if attempt > 1:
-            print(f"[DEBUG] Attempt {attempt}/{MAX_RETRIES} to call {backend_name} API.")
-        try:
-            if use_gemini:
-                response = gemini_client.models.generate_content(
-                    model=gemini_model_name,
-                    contents=prompt.strip()
-                )
-                return response.text.strip()
-            else:
-                client = OpenAI(api_key=openai_token)
-                completion = client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[{"role": "user", "content": prompt.strip()}],
-                    response_format={"type": "text"},
-                    temperature=1,
-                    max_completion_tokens=2048,
-                    top_p=1,
-                    frequency_penalty=0,
-                    presence_penalty=0)
-                return completion.choices[0].message.content.strip()
-
-        except Exception as e:
-            err_str = str(e)
-            print(f"[DEBUG] {backend_name} API call attempt {attempt} failed: {err_str}")
-            traceback.print_exc()
-
-            if attempt == MAX_RETRIES:
-                print_error_and_exit(
-                    f"Failed to get a valid response from {backend_name} after multiple attempts."
-                )
-
-            if "rate limit" in err_str.lower():
-                wait_time = 2 ** (attempt - 1)
-                print(f"[DEBUG] Rate limit encountered. Waiting {wait_time} seconds before retry...")
-                time.sleep(wait_time)
-            # Otherwise just retry immediately
-
-    return ""  # Should not reach here
+    else:
+        print("[ERROR] No valid API key provided or no LLM client available.")
+        sys.exit(1)
 
 
-def identify_structure(file_path):
+def call_openai_chat_completion(
+    model_name: str,
+    messages: List[Dict[str, str]],
+    temperature: float = 0.0,
+    max_tokens: int = None,
+) -> str:
     """
-    Determine if a file likely contains code and should be analyzed.
-
-    Heuristics:
-    1. Check file extension. If it's a common code extension (e.g. py, js, java, php, cs, rb, go, ts),
-       consider it likely code.
-    2. If not a known extension but the file is small (<1MB) and contains code-like patterns:
-       - Matches something like function definitions, imports, class definitions.
-    3. If binary or too large (>5MB), skip it.
+    Call the OpenAI Chat Completion endpoint.
     """
+    if not client:
+        print("[ERROR] OpenAI client unavailable.")
+        return ""
 
-    # File size check
-    if os.path.getsize(file_path) > 5 * 1024 * 1024:  # 5MB limit
-        return False
+    print("[INFO] Contacting OpenAI Chat Completion...")
+    try:
+        # For demonstration, these parameters might differ for your environment:
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        print(f"[ERROR] OpenAI Chat Completion failed: {e}")
+        return ""
 
-    known_extensions = {
-        ".py", ".js", ".java", ".php", ".cs", ".rb", ".go", ".ts", ".c", ".cpp", ".swift",
-        ".rs", ".scala", ".vb", ".sql"
+
+def call_gemini(prompt: str, temperature=0.0) -> str:
+    """
+    Call the Google PaLM (Gemini) API.
+    """
+    if not gemini_model_instance:
+        print("[ERROR] Gemini model is not initialized.")
+        return ""
+    try:
+        print("[INFO] Contacting Gemini (Google PaLM) API...")
+        response = gemini_model_instance.generate_content(
+            prompt,
+            generation_config=genai.types.GenerationConfig(
+                candidate_count=1,
+                temperature=temperature,
+            ),
+            stream=False,
+        )
+        # Non-stream approach: response is a single object
+        return response.text if response else ""
+    except Exception as e:
+        print(f"[ERROR] Gemini call failed: {e}")
+        return ""
+
+
+def call_vllm(prompt: str, temperature=0.0, max_tokens=3000) -> str:
+    """
+    Call a local vLLM model.
+    """
+    if not vllm_client:
+        print("[ERROR] vLLM client unavailable.")
+        return ""
+    try:
+        sampling_params = SamplingParams(temperature=temperature, max_tokens=max_tokens)
+        print("[INFO] Contacting local vLLM model ...")
+        results = vllm_client.infer(prompt, sampling_params)
+        # vLLM returns an iterator of results, each with .text
+        return "".join([r.text for r in results])
+    except Exception as e:
+        print(f"[ERROR] vLLM inference error: {e}")
+        return ""
+
+
+# ----------------------------------------------------------------------
+# Git Repo Analysis Helpers
+# ----------------------------------------------------------------------
+def get_repo_name(repo_path: str) -> str:
+    """Simple heuristic: take the directory name as the repo name."""
+    return os.path.basename(os.path.abspath(repo_path))
+
+
+def run_git_command(repo_path: str, args: List[str]) -> str:
+    """
+    Run a git command in `repo_path` and return its output as a string.
+    """
+    try:
+        result = subprocess.run(
+            ["git"] + args,
+            cwd=repo_path,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+        )
+        return result.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        return e.stdout.strip() + e.stderr.strip()
+
+
+def get_dates_and_authors(repo_path: str) -> Dict[str, Any]:
+    """
+    Retrieve earliest commit date, latest commit date, list of authors, and whether
+    there's recent activity in the last 1-2 years.
+    """
+    info = {
+        "earliest_commit_date": None,
+        "latest_commit_date": None,
+        "authors": [],
+        "active_recently": False,
     }
-    _, ext = os.path.splitext(file_path.lower())
-    if ext in known_extensions:
-        return True
+    # Get earliest commit date
+    log_oldest = run_git_command(
+        repo_path, ["log", "--reverse", "--pretty=%cd", "--date=short", "-1"]
+    )
+    info["earliest_commit_date"] = log_oldest
 
-    # If extension isn't known, try content heuristics
-    try:
-        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-            sample = f.read(5000)  # read first 5000 chars
-    except:
-        return False
+    # Get latest commit date
+    log_latest = run_git_command(
+        repo_path, ["log", "-1", "--pretty=%cd", "--date=short"]
+    )
+    info["latest_commit_date"] = log_latest
 
-    # Simple heuristics: check for common code patterns
-    code_patterns = [
-        r"(def |function |func |public |private |class )",
-        r"(import |using |#include )",
-        r"(=>|->|\{.*\})"
-    ]
+    # Grab all authors and store them. (This can be large on big repos.)
+    all_authors = run_git_command(repo_path, ["log", "--format=%an"])
+    authors_set = set(all_authors.splitlines())
+    info["authors"] = sorted(authors_set)
 
-    for pattern in code_patterns:
-        if re.search(pattern, sample):
-            return True
+    # Check if there's a commit in the last 1-2 years
+    # For simplicity, let's just check if there's a commit more recent than 365 days:
+    log_recent = run_git_command(
+        repo_path, ["log", f"--since=1.year.ago", "--pretty=oneline", "-1"]
+    )
+    info["active_recently"] = bool(log_recent)
 
-    return False
-
-
-def analyze_file_once(file_path, gemini_client, gemini_model_name):
-    with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-        content = f.read()
-
-    prompt = """
-You are an AI assistant analyzing a single code file.
-The file contents are between triple backticks:
-```
-""" + content + """
-```
-Produce a JSON only, with the following keys:
-- "endpoints": a list of HTTP endpoints found (like [{"method":"GET","path":"/api/user"}]) or "No relevant info"
-- "db_schema": a representation of database entities and relationships; if none, "No relevant info"
-- "external_calls": a list of external service calls, or "No relevant info"
-- "language": best guess of the programming language used, or "unknown"
-- "summary": a brief summary of what this file does, or "No relevant info"
-
-No extra text outside of JSON. Make sure the JSON is well-formed and uses double quotes.
-If you cannot determine something, put "No relevant info" for that key.
-If endpoints/db_schema/external_calls are found, output them in a structured way (arrays or objects).
-If no endpoints, db_schema, or external_calls are found, return the string "No relevant info" for that key.
-"""
-
-    response = infer(prompt, gemini_client=gemini_client, gemini_model_name=gemini_model_name)
-
-    # Try parsing JSON. If fails, we will return a default structure.
-    try:
-        # Remove Markdown code fences if present
-        cleaned_response = re.sub(r"```(?:json)?\s*", "", response.strip())
-        cleaned_response = re.sub(r"```", "", cleaned_response).strip()
-
-        data = json.loads(cleaned_response)
-        return data
-    except json.JSONDecodeError:
-        print(cleaned_response)
-        print("[DEBUG] Failed to parse JSON from LLM response. Returning default.")
-        return {
-            "endpoints": "No relevant info",
-            "db_schema": "No relevant info",
-            "external_calls": "No relevant info",
-            "language": "unknown",
-            "summary": "No relevant info"
-        }
+    return info
 
 
+def guess_build_run_instructions(repo_path: str) -> str:
+    """
+    A naive guess for how the project might be built or run, based on file inspection.
+    """
+    # If there's a requirements.txt or a setup.py or pyproject.toml => Python?
+    # If there's a package.json => Node?
+    # If there's a Makefile => maybe `make build`?
+    # Etc. We'll just do a quick check for some known files.
+    known_files = os.listdir(repo_path)
+    instructions = []
+
+    if "requirements.txt" in known_files or "pyproject.toml" in known_files:
+        instructions.append(
+            "Likely a Python-based project. You might run `pip install -r requirements.txt` or `pip install .`, then run `python main.py`."
+        )
+    if "package.json" in known_files:
+        instructions.append(
+            "Likely a Node.js project. You might run `npm install` or `yarn install`, then `npm run start` or `yarn start`."
+        )
+    if "Makefile" in known_files:
+        instructions.append("Contains a Makefile. Try `make build` or `make run`.")
+    if not instructions:
+        instructions.append(
+            "No common build files found. Fill in your instructions here."
+        )
+
+    return "\n".join(instructions)
+
+
+def guess_deployment(repo_path: str) -> str:
+    """
+    Check for typical deployment indicators: Dockerfile, .deploy folder, Jenkinsfile, etc.
+    """
+    found = []
+    files_in_root = set(os.listdir(repo_path))
+
+    # .deploy or deploy folder
+    if ".deploy" in files_in_root:
+        found.append("A `.deploy` folder suggests some custom deployment scripts.")
+    if "deploy" in files_in_root:
+        found.append("A `deploy` folder suggests custom deployment scripts.")
+
+    # Docker
+    if "Dockerfile" in files_in_root:
+        found.append("A `Dockerfile` is present (Docker-based deployment).")
+    if "docker-compose.yml" in files_in_root:
+        found.append("A `docker-compose.yml` file is present.")
+    if "Jenkinsfile" in files_in_root:
+        found.append("A `Jenkinsfile` is present (Jenkins-based CI/CD).")
+
+    if found:
+        return "\n".join(found)
+    return "No obvious deployment config found. (Check for other CI/CD systems.)"
+
+
+# ----------------------------------------------------------------------
+# Main Script
+# ----------------------------------------------------------------------
 def main():
     if len(sys.argv) != 2:
-        print("Usage: python analyze_repo.py <path_to_git_repo>")
+        print("Usage: python analyze_git_repo.py <path_to_git_repo>")
         sys.exit(1)
 
     repo_path = sys.argv[1]
-    if not os.path.exists(repo_path) or not os.path.isdir(repo_path):
-        print_error_and_exit("The provided path does not exist or is not a directory.")
+    if not os.path.isdir(repo_path):
+        print(f"[ERROR] '{repo_path}' is not a directory or does not exist.")
+        sys.exit(1)
 
-    gemini_client, gemini_model_name = init_clients()
+    # Make sure this is a valid Git repository by checking for .git folder
+    if not os.path.isdir(os.path.join(repo_path, ".git")):
+        print(
+            f"[ERROR] '{repo_path}' does not appear to be a Git repo (no .git folder)."
+        )
+        sys.exit(1)
 
-    # Enumerate files
-    print("[DEBUG] Enumerating files in the repository...")
-    file_list = []
-    for root, dirs, files in os.walk(repo_path):
-        if '.git' in root:
-            continue
-        for filename in files:
-            if filename.startswith('.git'):
-                continue
-            full_path = os.path.join(root, filename)
-            file_list.append(full_path)
+    # Gather info
+    repo_name = get_repo_name(repo_path)
+    date_author_info = get_dates_and_authors(repo_path)
+    build_instructions = guess_build_run_instructions(repo_path)
+    deploy_info = guess_deployment(repo_path)
 
-    if not file_list:
-        print("No files found in the provided repository path. Exiting.")
-        sys.exit(0)
+    # Compose user prompt for the LLM
+    # We'll ask the LLM to produce a README.
+    user_prompt = f"""
+Please generate a draft README for this repository with the following information:
 
-    # Write out the file list for traceability
-    file_list_path = os.path.join(repo_path, "file_list.txt")
-    with open(file_list_path, "w", encoding="utf-8") as f:
-        for fp in file_list:
-            f.write(os.path.relpath(fp, repo_path) + "\n")
-    print("[DEBUG] Full file list saved to file_list.txt")
+- **Repo Name**: {repo_name}
+- **Earliest Commit Date**: {date_author_info['earliest_commit_date']}
+- **Latest Commit Date**: {date_author_info['latest_commit_date']}
+- **Has it been active recently?**: {date_author_info['active_recently']}
+- **Contributors**: {", ".join(date_author_info['authors'])}
 
-    # Before analyzing each file:
-    # Create a directory for partial results if not exists
-    partial_dir = os.path.join(repo_path, "partial_results")
-    if not os.path.exists(partial_dir):
-        os.makedirs(partial_dir, exist_ok=True)
+We guessed how to build/run the project:
+{build_instructions}
 
-    for fp in tqdm(file_list, desc="Analyzing files"):
-        if identify_structure(fp):
-            # Check if a partial result already exists for this file:
-            rel_path = os.path.relpath(fp, repo_path)
-            result_file_path = os.path.join(partial_dir, rel_path.replace(os.sep, '_') + ".json")
-            if os.path.exists(result_file_path):
-                # Already analyzed this file in a previous run
-                with open(result_file_path, "r", encoding="utf-8") as rf:
-                    file_result = json.load(rf)
-            else:
-                # Analyze file and store partial result
-                file_result = analyze_file_once(fp, gemini_client, gemini_model_name)
-                file_result["file"] = rel_path
-                # Ensure directory exists for partial results (created above)
-                with open(result_file_path, "w", encoding="utf-8") as rf:
-                    json.dump(file_result, rf, indent=2)
-        else:
-            # Not code or too large, skip
-            continue
+We guessed how it's deployed:
+{deploy_info}
 
-    results.append(file_result)
+We also want placeholders or sections for:
+- **Ownership** (the team or individual who owns this repo)
+- **High-level Architecture** or design details
+- **Roadmap / Future Plans**
 
-    # Aggregate results
-    all_endpoints = []
-    all_nodes = set()
-    all_edges = set()
-    all_calls = []
+Please produce a **markdown** README that includes:
+1. A short description of the project
+2. A summary of interesting commit or activity trends
+3. Steps for building/running the project
+4. Notes on deployment
+5. Clearly labeled placeholders or prompts for ownership and architecture details
+6. Any other relevant notes or disclaimers
 
-    for r in results:
-        endpoints = r.get("endpoints", "No relevant info")
-        if isinstance(endpoints, list) and endpoints:
-            # Expecting [{"method":"GET","path":"/api"}]
-            for ep in endpoints:
-                method = ep.get("method", "UNKNOWN").upper()
-                path = ep.get("path", "/unknown")
-                all_endpoints.append(f"{method} {path}")
-        elif endpoints != "No relevant info" and endpoints:
-            # If LLM returns something unexpected
-            if isinstance(endpoints, str):
-                all_endpoints.append(endpoints)
-        # db_schema: can be complex. Expecting arrays or something similar
-        db_schema = r.get("db_schema", "No relevant info")
-        if db_schema != "No relevant info":
-            # Heuristics: if db_schema might contain something like "ENTITY: desc"
-            # or "A -> B". If it's a list, parse lines. If string, split by lines.
-            lines = db_schema if isinstance(db_schema, list) else db_schema.split("\n")
-            for line in lines:
-                line = line.strip()
-                if "->" in line:
-                    all_edges.add(line)
-                elif ":" in line:
-                    entity = line.split(":", 1)[0].strip()
-                    all_nodes.add(entity)
-
-        external_calls = r.get("external_calls", "No relevant info")
-        if isinstance(external_calls, list):
-            all_calls.extend(external_calls)
-        elif external_calls != "No relevant info":
-            all_calls.append(external_calls)
-
-    # Write endpoints
-    http_endpoints_file = os.path.join(repo_path, "http_endpoints.txt")
-    if all_endpoints:
-        with open(http_endpoints_file, "w", encoding="utf-8") as f:
-            f.write("\n".join(all_endpoints) + "\n")
-    else:
-        with open(http_endpoints_file, "w", encoding="utf-8") as f:
-            f.write("No HTTP endpoints found.\n")
-
-    # Write db_schema
-    db_schema_file = os.path.join(repo_path, "db_schema.dot")
-    if all_nodes or all_edges:
-        dot_lines = ["digraph schema {"]
-        for node in all_nodes:
-            dot_lines.append(f'  "{node}" [shape=box];')
-        for edge in all_edges:
-            dot_lines.append(f'  {edge};')
-        dot_lines.append("}")
-        with open(db_schema_file, "w", encoding="utf-8") as f:
-            f.write("\n".join(dot_lines) + "\n")
-    else:
-        with open(db_schema_file, "w", encoding="utf-8") as f:
-            f.write("digraph schema {\n// No database schema found.\n}\n")
-
-    # Write external calls
-    third_party_calls_file = os.path.join(repo_path, "third_party_calls.txt")
-    if all_calls:
-        with open(third_party_calls_file, "w", encoding="utf-8") as f:
-            for c in all_calls:
-                if isinstance(c, dict):
-                    # If structured call info is given
-                    f.write(json.dumps(c) + "\n")
-                else:
-                    f.write(str(c) + "\n")
-    else:
-        with open(third_party_calls_file, "w", encoding="utf-8") as f:
-            f.write("No external calls found.\n")
-
-    # Produce README
-    try:
-        with open(http_endpoints_file, "r", encoding="utf-8") as f:
-            http_endpoints_content = f.read().strip()
-    except IOError:
-        http_endpoints_content = "No HTTP endpoints found."
-
-    try:
-        with open(db_schema_file, "r", encoding="utf-8") as f:
-            db_schema_content = f.read().strip()
-    except IOError:
-        db_schema_content = "digraph schema {\n// No database schema found.\n}"
-
-    try:
-        with open(third_party_calls_file, "r", encoding="utf-8") as f:
-            third_party_calls_content = f.read().strip()
-    except IOError:
-        third_party_calls_content = "No external calls found."
-
-    # Summarize into README.gen
-    # Including language and summary was per-file. For final summary, just mention we have analyzed them.
-    # We could incorporate per-file summaries, but let's keep final README similar.
-    step4_prompt = f"""
-You are an AI assistant. You have these analyses from multiple files:
-
-HTTP endpoints:
-{http_endpoints_content}
-
-Database schema:
-{db_schema_content}
-
-Third-party calls:
-{third_party_calls_content}
-
-Produce a README as follows:
-
-# Analysis Summary
-A one-paragraph summary synthesizing the information from the analyses.
-
-## HTTP Endpoints
-{http_endpoints_content}
-
-## Database Schema
-{db_schema_content}
-
-## Third-Party Calls
-{third_party_calls_content}
+If some information is not detected or uncertain, just make a note that a human should fill it in.
 """
 
-    readme_file = os.path.join(repo_path, "README.gen")
-    step4_output = infer(step4_prompt, gemini_client=gemini_client, gemini_model_name=gemini_model_name)
-    try:
-        with open(readme_file, "w", encoding="utf-8") as f:
-            f.write(step4_output + "\n")
-    except IOError as e:
-        print_error_and_exit(
-            f"Error writing README.gen: {str(e)}. "
-            "Check write permissions to the repository directory."
-        )
-    print(f"[DEBUG] Analysis complete. The final README is at: {readme_file}")
+    # (Optional) We can have a simple system prompt for style or clarity
+    system_prompt = "You are a helpful assistant for generating README content. Please be concise and helpful."
+
+    # Call the LLM
+    readme_content = call_llm_system_user(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        temperature=0.2,
+        max_tokens=2000,
+    )
+
+    # Print the README to stdout
+    print(readme_content)
 
 
 if __name__ == "__main__":
