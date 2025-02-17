@@ -85,8 +85,8 @@ except Exception as e:
 
 
 if gemini_api_key:
-    MAX_TOKENS = 800000
-    MAX_CHUNK_SIZE = 500000
+    MAX_TOKENS = 900000
+    MAX_CHUNK_SIZE = 800000
 elif deepseek_api_key:
     MAX_TOKENS = 5000
     MAX_CHUNK_SIZE = 200000
@@ -258,7 +258,7 @@ def dependency_graph_summary(ir: Dict[str, Any]) -> str:
 # LLM Utility Functions & Chunking
 # ----------------------------------------------------------------------
 def call_llm_system_user(
-    system_prompt: str, user_prompt: str, temperature=0.0, max_tokens=8000
+    system_prompt: str, user_prompt: str, temperature, max_tokens
 ) -> str:
     """
     Calls the LLM with system and user prompts using OpenAI if available,
@@ -431,7 +431,7 @@ def multi_pass_conversion(
     ir: Dict[str, Any],
     raw_project: str,
     intermediate_dir: str,
-    temperature=0.0,
+    temperature=0.5,
     max_tokens=3000,
 ) -> str:
     """
@@ -598,7 +598,7 @@ def main():
 
     print("[INFO] Starting multi-pass conversion process. This may take some time...")
     final_code = multi_pass_conversion(
-        ir_data, raw_project, temperature=0.0, max_tokens=MAX_TOKENS
+        ir_data, raw_project, intermediate_dir, temperature=0.5, max_tokens=MAX_TOKENS
     )
 
     if not final_code.strip():
